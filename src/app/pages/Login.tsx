@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router";
 import { useAuth } from "../context/AuthContext";
 import { Button } from "../components/ui/button";
@@ -9,22 +9,33 @@ import logoImage from "../../assets/d83767957783007976f4c71d1b997e4eb7d271d2.png
 
 export default function Login() {
   const navigate = useNavigate();
-  const { login } = useAuth();
-  const [username, setUsername] = useState("");
+  const { login, user } = useAuth();
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  // React to auth state changes for navigation
+  // This prevents the race condition where Firebase auth succeeds but the user doc hasn't loaded yet
+  useEffect(() => {
+    if (user) {
+      navigate("/dashboard");
+    }
+  }, [user, navigate]);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setIsLoading(true);
     
-    const result = login(username, password);
-    if (result.success) {
-      navigate("/dashboard");
-    } else {
+    const result = await login(email, password);
+    if (!result.success) {
       setError(result.error);
+      setIsLoading(false);
     }
+    // On success, we just wait for the onAuthStateChanged listener to set the user
+    // and trigger the useEffect above.
   };
 
   return (
@@ -50,13 +61,13 @@ export default function Login() {
 
           <form onSubmit={handleLogin} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="username">Username</Label>
+              <Label htmlFor="email">Email</Label>
               <Input
-                id="username"
-                type="text"
-                placeholder="Enter your username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                id="email"
+                type="email"
+                placeholder="Enter your email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full"
               />
@@ -95,8 +106,8 @@ export default function Login() {
               </div>
             )}
 
-            <Button type="submit" className="w-full bg-blue-600 hover:bg-blue-700">
-              Login
+            <Button type="submit" className="w-full bg-blue-600 hover:bg-blue-700" disabled={isLoading}>
+              {isLoading ? "Signing in..." : "Login"}
             </Button>
           </form>
 
@@ -106,11 +117,11 @@ export default function Login() {
             <div className="space-y-2 text-sm">
               <div className="flex justify-between p-2 bg-gray-50 rounded border border-gray-100">
                 <span className="text-gray-600">Admin:</span>
-                <span className="font-mono font-medium text-gray-800">admin / admin123</span>
+                <span className="font-mono font-medium text-gray-800">admin@museum.com / password</span>
               </div>
               <div className="flex justify-between p-2 bg-gray-50 rounded border border-gray-100">
                 <span className="text-gray-600">Curator:</span>
-                <span className="font-mono font-medium text-gray-800">curator / curator123</span>
+                <span className="font-mono font-medium text-gray-800">curator@museum.com / password</span>
               </div>
             </div>
           </div>
