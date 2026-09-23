@@ -1,11 +1,43 @@
+# Hiyas Museum - IoT Museum Dashboard
 
-  # IoT Museum Dashboard Design (Community)
+An interactive and real-time IoT dashboard designed for the Hiyas Museum. This system provides a comprehensive interface to monitor and manage museum environments, track visitor engagement, and oversee IoT-enabled exhibits.
 
-  This is a code bundle for IoT Museum Dashboard Design (Community). The original project is available at https://www.figma.com/design/G4pF229YeECqszwh1IkVJJ/IoT-Museum-Dashboard-Design--Community-.
+## What the System Does
+- **Real-Time Monitoring:** Tracks environmental metrics (temperature, humidity, etc.) critical for artifact preservation using IoT sensors.
+- **Visitor Analytics:** Displays visitor counts, engagement statistics, and foot traffic.
+- **Exhibit Management:** Allows staff to manage and monitor the status of various interactive and connected exhibits.
+- **Data Visualization:** Presents complex sensor data through intuitive charts and graphs for quick decision-making.
 
-  ## Running the code
+## Who Uses It
+- **Museum Administrators:** To oversee daily operations, visitor statistics, and general facility status.
+- **Curators & Conservators:** To ensure environmental conditions remain optimal for the safe preservation of artifacts.
+- **Facility Managers:** To monitor the health and operational status of IoT devices, sensors, and exhibits across the museum.
 
-  Run `npm i` to install the dependencies.
+## My Role
+**Developer:** Responsible for building the frontend architecture, implementing the UI/UX design, and integrating real-time backend services (Firebase) to ensure a seamless, responsive, and dynamic user experience.
 
-  Run `npm run dev` to start the development server.
-  
+## Tools and Languages Used
+- **Languages:** TypeScript, HTML, CSS
+- **Frameworks & Libraries:** React 18, Vite
+- **Styling & UI:** Tailwind CSS, Radix UI (shadcn/ui)
+- **Backend & Real-time Data:** Firebase
+- **Data Visualization:** Recharts
+- **Animations:** Framer Motion
+- **Icons:** Lucide React, Material UI Icons
+
+## Running the Project Local Environment
+
+1. Install the dependencies:
+   ```bash
+   npm install
+   ```
+
+2. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+3. Build for production:
+   ```bash
+   npm run build
+   ```
