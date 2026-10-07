@@ -82,7 +82,8 @@ interface MuseumContextType {
   acknowledgeAlert: (alertId: string, acknowledgedBy?: string) => void;
   archiveSensor: (sensorId: string) => void;
   deleteSensor: (sensorId: string) => void;
-  addSensor: (name: string, location: string) => void;
+  /** Optional hardwareDeviceId must match Arduino DEVICE_ID (e.g. esp32_gallery_a_1) to link RTDB */
+  addSensor: (name: string, location: string, hardwareDeviceId?: string) => void;
   setNavigateToAlerts: (callback: () => void) => void;
   // Contact management
   addContact: (contact: Omit<Contact, 'id' | 'archived'>) => void;
@@ -430,12 +431,16 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
                 temperature,
                 humidity,
                 motionDetected,
+                status: motionDetected
+                  ? "critical"
+                  : temperature > 24 || humidity > 60
+                    ? "warning"
+                    : "safe",
                 lastUpdated: Timestamp.now(),
                 hardware: true,
                 source: "esp32",
                 distanceCm: raw.distanceCm != null ? Number(raw.distanceCm) : null,
                 archived: false,
-                // Keep identity fields if doc is new
                 name: raw.name || deviceId,
                 location: raw.location || "Unknown",
               },
@@ -779,23 +784,40 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  const addSensor = async (name: string, location: string) => {
+  const addSensor = async (name: string, location: string, hardwareDeviceId?: string) => {
     try {
-      await addDoc(collection(db, "sensors"), {
+      const deviceId = hardwareDeviceId?.trim();
+      const payload = {
         name,
         location,
         temperature: 20,
         humidity: 45,
         motionDetected: false,
-        status: "safe",
+        status: "safe" as const,
         lastUpdated: Timestamp.now(),
         tempThreshold: 24,
         humidityThreshold: 60,
         motionThreshold: settings.motionThreshold,
         distanceThreshold: settings.distanceThreshold,
         archived: false,
-      });
-      toast.success("Sensor added successfully");
+        hardware: Boolean(deviceId),
+        source: deviceId ? "esp32" : "manual",
+      };
+
+      if (deviceId) {
+        // Re-link to ESP: must match Arduino DEVICE_ID and RTDB /liveSensors/{id}
+        deletedSensorIdsRef.current.delete(deviceId);
+        try {
+          await deleteDoc(doc(db, "deletedSensors", deviceId));
+        } catch {
+          /* may not exist */
+        }
+        await setDoc(doc(db, "sensors", deviceId), payload, { merge: true });
+        toast.success(`Sensor linked to hardware ID "${deviceId}"`);
+      } else {
+        await addDoc(collection(db, "sensors"), payload);
+        toast.success("Sensor added (not linked to ESP — add a Hardware Device ID to connect)");
+      }
     } catch (error) {
       console.error("Error adding sensor:", error);
       toast.error("Failed to add sensor");
