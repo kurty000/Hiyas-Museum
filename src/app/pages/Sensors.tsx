@@ -366,36 +366,51 @@ export default function Sensors() {
                   </div>
                 </div>
 
-                {/* Motion Detection */}
-                <div
-                  className={`flex items-center justify-between p-3 rounded-lg ${
-                    sensor.motionDetected ? "bg-red-50" : "bg-gray-50"
-                  }`}
-                >
-                  <div className="flex items-center gap-3">
+                {/* Motion / Proximity */}
+                {(() => {
+                  const limitCm = sensor.distanceThreshold * 100;
+                  const tooClose =
+                    sensor.distanceCm != null &&
+                    sensor.distanceCm >= 0 &&
+                    sensor.distanceCm <= limitCm;
+                  const breach = sensor.motionDetected || tooClose;
+                  return (
                     <div
-                      className={`p-2 rounded ${
-                        sensor.motionDetected ? "bg-red-100" : "bg-gray-100"
+                      className={`flex items-center justify-between p-3 rounded-lg ${
+                        breach ? "bg-red-50" : "bg-gray-50"
                       }`}
                     >
-                      <Radio
-                        className={`w-5 h-5 ${
-                          sensor.motionDetected ? "text-red-600" : "text-gray-600"
-                        }`}
-                      />
+                      <div className="flex items-center gap-3">
+                        <div
+                          className={`p-2 rounded ${
+                            breach ? "bg-red-100" : "bg-gray-100"
+                          }`}
+                        >
+                          <Radio
+                            className={`w-5 h-5 ${
+                              breach ? "text-red-600" : "text-gray-600"
+                            }`}
+                          />
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-600">Proximity Status</p>
+                          <p
+                            className={`text-lg font-bold ${
+                              breach ? "text-red-600" : "text-gray-900"
+                            }`}
+                          >
+                            {breach ? "Breach!" : "Safe"}
+                          </p>
+                          {sensor.distanceCm != null && (
+                            <p className="text-xs text-gray-500">
+                              {sensor.distanceCm.toFixed(1)} cm / limit {limitCm.toFixed(0)} cm
+                            </p>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-xs text-gray-600">Proximity Status</p>
-                      <p
-                        className={`text-lg font-bold ${
-                          sensor.motionDetected ? "text-red-600" : "text-gray-900"
-                        }`}
-                      >
-                        {sensor.motionDetected ? "Breach!" : "Safe"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
+                  );
+                })()}
 
                 {isAdmin && (
                   <>
