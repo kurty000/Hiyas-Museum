@@ -270,70 +270,67 @@ export default function Sensors() {
                   </div>
                   <div className="flex items-center gap-2">
                     {getStatusBadge(sensor.status)}
-                    {isAdmin && (
-                      <>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <button
-                              title="Archive sensor"
-                              className="h-8 w-8 inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-orange-50 hover:text-orange-600 text-gray-400"
-                            >
-                              <Archive className="w-4 h-4" />
-                            </button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Archive Sensor</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                Are you sure you want to archive the sensor "{sensor.name}"? Historical readings and alert records will be preserved. This sensor will no longer appear in active monitoring.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => archiveSensor(sensor.id)}
-                                className="bg-orange-600 hover:bg-orange-700"
-                              >
-                                Archive
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              className="h-8 gap-1"
-                              title="Delete sensor"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                              Delete
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Delete Sensor</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                Permanently delete "{sensor.name}"? This removes it from Firestore and live sensors. Historical alerts/logs are kept. The ESP may recreate the live entry if it is still sending data.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() => deleteSensor(sensor.id)}
-                                className="bg-red-600 hover:bg-red-700"
-                              >
-                                Delete
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </>
-                    )}
                   </div>
                 </div>
+                {isAdmin && (
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="border-orange-300 text-orange-700 hover:bg-orange-50"
+                        >
+                          <Archive className="w-4 h-4 mr-1" />
+                          Archive
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Archive Sensor</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Archive "{sensor.name}"? It will leave active monitoring; history is kept.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => archiveSensor(sensor.id)}
+                            className="bg-orange-600 hover:bg-orange-700"
+                          >
+                            Archive
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button variant="destructive" size="sm">
+                          <Trash2 className="w-4 h-4 mr-1" />
+                          Delete Sensor
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Delete Sensor</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Permanently delete "{sensor.name}"? To reconnect this ESP later, Add Sensor with the same Hardware Device ID.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => deleteSensor(sensor.id)}
+                            className="bg-red-600 hover:bg-red-700"
+                          >
+                            Delete
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                )}
               </CardHeader>
               <CardContent className="space-y-4">
                 {/* Temperature */}
