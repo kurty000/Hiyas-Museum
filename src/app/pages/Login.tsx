@@ -110,21 +110,6 @@ export default function Login() {
               {isLoading ? "Signing in..." : "Login"}
             </Button>
           </form>
-
-          {/* Demo Credentials Hint */}
-          <div className="mt-6 pt-6 border-t border-gray-100">
-            <h3 className="text-sm font-semibold text-gray-700 mb-3">Demo Credentials</h3>
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between p-2 bg-gray-50 rounded border border-gray-100">
-                <span className="text-gray-600">Admin:</span>
-                <span className="font-mono font-medium text-gray-800">admin@museum.com / password</span>
-              </div>
-              <div className="flex justify-between p-2 bg-gray-50 rounded border border-gray-100">
-                <span className="text-gray-600">Curator:</span>
-                <span className="font-mono font-medium text-gray-800">curator@museum.com / password</span>
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* Footer text */}
