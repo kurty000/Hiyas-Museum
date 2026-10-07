@@ -221,19 +221,32 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
     for (const [id, live] of Object.entries(liveReadingsRef.current)) {
       const existing = byId.get(id);
+      // Keep Firestore settings (thresholds). Only overlay live ESP readings.
+      const tempThreshold = existing?.tempThreshold ?? 24;
+      const humidityThreshold = existing?.humidityThreshold ?? 60;
+      const motionThreshold = existing?.motionThreshold ?? 5;
+      const distanceThreshold = existing?.distanceThreshold ?? 1.5;
+      const temperature = live.temperature ?? existing?.temperature ?? 20;
+      const humidity = live.humidity ?? existing?.humidity ?? 45;
+      const motionDetected = live.motionDetected ?? existing?.motionDetected ?? false;
+
+      let status: SensorData["status"] = "safe";
+      if (motionDetected) status = "critical";
+      else if (temperature > tempThreshold || humidity > humidityThreshold) status = "warning";
+
       byId.set(id, {
         id,
-        name: live.name || existing?.name || id,
-        location: live.location || existing?.location || "Unknown",
-        temperature: live.temperature ?? existing?.temperature ?? 20,
-        humidity: live.humidity ?? existing?.humidity ?? 45,
-        motionDetected: live.motionDetected ?? existing?.motionDetected ?? false,
-        status: live.status || existing?.status || "safe",
+        name: existing?.name || live.name || id,
+        location: existing?.location || live.location || "Unknown",
+        temperature,
+        humidity,
+        motionDetected,
+        status,
         lastUpdated: live.lastUpdated || existing?.lastUpdated || new Date(),
-        tempThreshold: live.tempThreshold ?? existing?.tempThreshold ?? 24,
-        humidityThreshold: live.humidityThreshold ?? existing?.humidityThreshold ?? 60,
-        motionThreshold: live.motionThreshold ?? existing?.motionThreshold ?? 5,
-        distanceThreshold: live.distanceThreshold ?? existing?.distanceThreshold ?? 1.5,
+        tempThreshold,
+        humidityThreshold,
+        motionThreshold,
+        distanceThreshold,
         archived: existing?.archived ?? false,
       });
     }
@@ -357,10 +370,11 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     if (!seeded) return;
 
     const liveRef = rtdbRef(rtdb, "liveSensors");
-    const unsubLive = onValue(liveRef, async (snap) => {
+    const unsubLive = onValue(
+      liveRef,
+      async (snap) => {
       const val = snap.val() as Record<string, any> | null;
       const ids = new Set<string>();
-      const liveSensors: SensorData[] = [];
 
       if (val) {
         for (const [deviceId, raw] of Object.entries(val)) {
@@ -370,70 +384,35 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           const temperature = Number(raw.temperature ?? 20);
           const humidity = Number(raw.humidity ?? 45);
           const motionDetected = Boolean(raw.motionDetected);
-          const status: SensorData["status"] =
-            raw.status === "warning" || raw.status === "critical" || raw.status === "offline"
-              ? raw.status
-              : temperature > Number(raw.tempThreshold ?? 24) ||
-                  humidity > Number(raw.humidityThreshold ?? 60)
-                ? "warning"
-                : "safe";
 
-          const distanceThreshold =
-            raw.distanceThresholdCm != null
-              ? Number(raw.distanceThresholdCm) / 100
-              : 1.5;
-
+          // Live overlay: readings only — never overwrite user threshold settings
           const livePartial: Partial<SensorData> = {
             name: raw.name || deviceId,
             location: raw.location || "Unknown",
             temperature,
             humidity,
             motionDetected,
-            status,
             lastUpdated: new Date(),
-            tempThreshold: Number(raw.tempThreshold ?? 24),
-            humidityThreshold: Number(raw.humidityThreshold ?? 60),
-            motionThreshold: Number(raw.motionThreshold ?? 5),
-            distanceThreshold,
           };
 
           liveReadingsRef.current[deviceId] = livePartial;
-          liveSensors.push({
-            id: deviceId,
-            name: livePartial.name!,
-            location: livePartial.location!,
-            temperature,
-            humidity,
-            motionDetected,
-            status,
-            lastUpdated: livePartial.lastUpdated!,
-            tempThreshold: livePartial.tempThreshold!,
-            humidityThreshold: livePartial.humidityThreshold!,
-            motionThreshold: livePartial.motionThreshold!,
-            distanceThreshold,
-            archived: false,
-          });
 
-          // Best-effort mirror into Firestore (dashboard still updates from RTDB even if this fails)
+          // Mirror live readings into Firestore only (do not touch thresholds)
           try {
             await setDoc(
               doc(db, "sensors", deviceId),
               {
-                name: livePartial.name,
-                location: livePartial.location,
                 temperature,
                 humidity,
                 motionDetected,
-                status,
                 lastUpdated: Timestamp.now(),
-                tempThreshold: livePartial.tempThreshold,
-                humidityThreshold: livePartial.humidityThreshold,
-                motionThreshold: livePartial.motionThreshold,
-                distanceThreshold,
-                archived: false,
                 hardware: true,
                 source: "esp32",
                 distanceCm: raw.distanceCm != null ? Number(raw.distanceCm) : null,
+                archived: false,
+                // Keep identity fields if doc is new
+                name: raw.name || deviceId,
+                location: raw.location || "Unknown",
               },
               { merge: true }
             );
@@ -447,7 +426,12 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
       // Push live ESP values into the UI immediately (do not wait for Firestore)
       setSensors((prev) => mergeLiveOntoSensors(prev));
-    });
+      },
+      (err) => {
+        console.error("[LIVE] RTDB /liveSensors read failed:", err);
+        toast.error("Cannot read live ESP data from Realtime Database. Check RTDB rules.");
+      }
+    );
 
     return () => unsubLive();
   }, [seeded]);
@@ -705,6 +689,14 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       await updateDoc(doc(db, "sensors", sensorId), {
         tempThreshold, humidityThreshold, motionThreshold, distanceThreshold
       });
+      // Keep UI thresholds even while live ESP readings keep streaming
+      setSensors((prev) =>
+        prev.map((s) =>
+          s.id === sensorId
+            ? { ...s, tempThreshold, humidityThreshold, motionThreshold, distanceThreshold }
+            : s
+        )
+      );
       toast.success("Sensor settings updated successfully");
     } catch (error) {
       console.error("Error updating sensor settings:", error);
