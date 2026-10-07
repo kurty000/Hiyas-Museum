@@ -8,7 +8,7 @@ import { Label } from "../components/ui/label";
 import { Slider } from "../components/ui/slider";
 import { Separator } from "../components/ui/separator";
 import { Input } from "../components/ui/input";
-import { Thermometer, Droplets, Radio, Settings, Activity, Target, Plus, Trash2 } from "lucide-react";
+import { Thermometer, Droplets, Radio, Settings, Activity, Target, Plus, Trash2, Cpu } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,11 +27,18 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "../components/ui/dialog";
+import type { DetectedDevice } from "../context/MuseumContext";
 
 export default function Sensors() {
-  const { sensors, deleteSensor, updateSensorSettings, addSensor } = useMuseum();
+  const {
+    sensors,
+    detectedDevices,
+    deleteSensor,
+    updateSensorSettings,
+    registerDetectedSensor,
+    settings,
+  } = useMuseum();
   const { isAdmin } = useAuth();
   const [editingSensor, setEditingSensor] = useState<string | null>(null);
   const [tempSettings, setTempSettings] = useState<{
@@ -40,16 +47,21 @@ export default function Sensors() {
     motionThreshold: number;
     distanceThreshold: number;
   } | null>(null);
-  const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [confirmAddDialogOpen, setConfirmAddDialogOpen] = useState(false);
-  const [confirmSaveDialogOpen, setConfirmSaveDialogOpen] = useState(false);
-  const [savingSensorId, setSavingSensorId] = useState<string | null>(null);
+  const [registerDialogOpen, setRegisterDialogOpen] = useState(false);
+  const [confirmRegisterOpen, setConfirmRegisterOpen] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [selectedDevice, setSelectedDevice] = useState<DetectedDevice | null>(null);
   const [newSensorName, setNewSensorName] = useState("");
   const [newSensorLocation, setNewSensorLocation] = useState("");
-  const [newSensorDeviceId, setNewSensorDeviceId] = useState("esp32_gallery_a_1");
+  const [newTempThreshold, setNewTempThreshold] = useState(24);
+  const [newHumidityThreshold, setNewHumidityThreshold] = useState(60);
+  const [newMotionThreshold, setNewMotionThreshold] = useState(5);
+  const [newDistanceThreshold, setNewDistanceThreshold] = useState(150);
+  const [confirmSaveDialogOpen, setConfirmSaveDialogOpen] = useState(false);
+  const [savingSensorId, setSavingSensorId] = useState<string | null>(null);
 
-  // Only show non-archived sensors
-  const activeSensors = sensors.filter(s => !s.archived);
+  // Only show non-archived registered sensors
+  const activeSensors = sensors.filter((s) => !s.archived);
 
   const handleEditSensor = (sensorId: string, tempThreshold: number, humidityThreshold: number, motionThreshold: number, distanceThreshold: number) => {
     setEditingSensor(sensorId);
@@ -97,26 +109,47 @@ export default function Sensors() {
     return "border-red-200";
   };
 
-  const handlePrepareAddSensor = () => {
-    if (newSensorName && newSensorLocation) {
-      setAddDialogOpen(false);
-      setConfirmAddDialogOpen(true);
+  const openRegisterDialog = (device: DetectedDevice) => {
+    setSelectedDevice(device);
+    setNewSensorName(device.suggestedName);
+    setNewSensorLocation(device.suggestedLocation);
+    setNewTempThreshold(24);
+    setNewHumidityThreshold(60);
+    setNewMotionThreshold(settings.motionThreshold ?? 5);
+    setNewDistanceThreshold(settings.distanceThreshold ?? 150);
+    setRegisterDialogOpen(true);
+  };
+
+  const handlePrepareRegister = () => {
+    if (!selectedDevice || !newSensorName.trim() || !newSensorLocation.trim()) return;
+    setRegisterDialogOpen(false);
+    setConfirmRegisterOpen(true);
+  };
+
+  const handleConfirmRegister = async () => {
+    if (!selectedDevice) return;
+    setRegistering(true);
+    try {
+      await registerDetectedSensor({
+        deviceId: selectedDevice.deviceId,
+        name: newSensorName.trim(),
+        location: newSensorLocation.trim(),
+        tempThreshold: newTempThreshold,
+        humidityThreshold: newHumidityThreshold,
+        motionThreshold: newMotionThreshold,
+        distanceThreshold: newDistanceThreshold,
+      });
+      setConfirmRegisterOpen(false);
+      setSelectedDevice(null);
+    } finally {
+      setRegistering(false);
     }
   };
 
-  const handleConfirmAddSensor = () => {
-    addSensor(newSensorName, newSensorLocation, newSensorDeviceId.trim() || undefined);
-    setConfirmAddDialogOpen(false);
-    setNewSensorName("");
-    setNewSensorLocation("");
-    setNewSensorDeviceId("esp32_gallery_a_1");
-  };
-
-  const handleCancelAddSensor = () => {
-    setConfirmAddDialogOpen(false);
-    setNewSensorName("");
-    setNewSensorLocation("");
-    setNewSensorDeviceId("esp32_gallery_a_1");
+  const handleCancelRegister = () => {
+    setConfirmRegisterOpen(false);
+    setRegisterDialogOpen(false);
+    setSelectedDevice(null);
   };
 
   return (
@@ -125,106 +158,10 @@ export default function Sensors() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Sensor Monitoring</h1>
-          <p className="text-gray-600 mt-1">Real-time status of all environmental sensors</p>
+          <p className="text-gray-600 mt-1">
+            Detected hardware must be registered before monitoring
+          </p>
         </div>
-        
-        {/* Add Sensor Button */}
-        {isAdmin && (
-          <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-            <DialogTrigger asChild>
-              <Button className="bg-green-600 hover:bg-green-700">
-                <Plus className="w-4 h-4 mr-2" />
-                Add Sensor
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Add New Sensor</DialogTitle>
-                <DialogDescription>
-                  Enter the details for the new sensor device.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4 py-4">
-                <div className="space-y-2">
-                  <Label htmlFor="sensor-name" className="text-sm font-medium text-gray-700">Sensor Name</Label>
-                  <Input
-                    id="sensor-name"
-                    placeholder="e.g., Gallery D - Artifact 1"
-                    value={newSensorName}
-                    onChange={(e) => setNewSensorName(e.target.value)}
-                    className="w-full"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="sensor-location" className="text-sm font-medium text-gray-700">Location</Label>
-                  <Input
-                    id="sensor-location"
-                    placeholder="e.g., Gallery D"
-                    value={newSensorLocation}
-                    onChange={(e) => setNewSensorLocation(e.target.value)}
-                    className="w-full"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="sensor-device-id" className="text-sm font-medium text-gray-700">
-                    Hardware Device ID (ESP32)
-                  </Label>
-                  <Input
-                    id="sensor-device-id"
-                    placeholder="esp32_gallery_a_1"
-                    value={newSensorDeviceId}
-                    onChange={(e) => setNewSensorDeviceId(e.target.value)}
-                    className="w-full font-mono text-sm"
-                  />
-                  <p className="text-xs text-gray-500">
-                    Must match the Arduino <code className="bg-gray-100 px-1 rounded">DEVICE_ID</code> and
-                    Realtime Database path <code className="bg-gray-100 px-1 rounded">liveSensors/…</code>.
-                    Leave empty only for a manual (non-ESP) sensor.
-                  </p>
-                </div>
-              </div>
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => setAddDialogOpen(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handlePrepareAddSensor}
-                  disabled={!newSensorName || !newSensorLocation}
-                  className="bg-blue-600 hover:bg-blue-700"
-                >
-                  Add Sensor
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        )}
-
-        {/* Add Sensor Confirmation Dialog */}
-        <AlertDialog open={confirmAddDialogOpen} onOpenChange={setConfirmAddDialogOpen}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Confirm Add Sensor</AlertDialogTitle>
-              <AlertDialogDescription>
-                Add "{newSensorName}" at "{newSensorLocation}"
-                {newSensorDeviceId.trim()
-                  ? ` linked to hardware ID "${newSensorDeviceId.trim()}" (Realtime DB)?`
-                  : " as a manual sensor (not linked to ESP)?"}
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel onClick={handleCancelAddSensor}>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={handleConfirmAddSensor}
-                className="bg-green-600 hover:bg-green-700"
-              >
-                Confirm Add
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
 
         {/* Save Threshold Confirmation Dialog */}
         <AlertDialog open={confirmSaveDialogOpen} onOpenChange={setConfirmSaveDialogOpen}>
@@ -248,8 +185,224 @@ export default function Sensors() {
         </AlertDialog>
       </div>
 
-      {/* Sensors Grid */}
+      {/* Detected Devices — not yet registered */}
+      <section className="space-y-4">
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900">Detected Devices</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              Hardware reporting on the network. Add a device as a sensor to start monitoring it.
+            </p>
+          </div>
+          {detectedDevices.length > 0 && (
+            <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">
+              {detectedDevices.length} detected
+            </Badge>
+          )}
+        </div>
+
+        {detectedDevices.length === 0 ? (
+          <Card className="border border-dashed border-gray-300 bg-gray-50/60">
+            <CardContent className="py-10 text-center text-gray-500">
+              <Cpu className="w-8 h-8 mx-auto mb-3 text-gray-400" />
+              <p className="font-medium text-gray-700">No new devices detected</p>
+              <p className="text-sm mt-1">
+                When an ESP32 writes to Realtime Database <code className="bg-white px-1 rounded border">liveSensors/…</code>, it will appear here.
+              </p>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {detectedDevices.map((device) => (
+              <Card key={device.deviceId} className="border-2 border-amber-200 bg-amber-50/40">
+                <CardHeader className="pb-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <CardTitle className="text-base">{device.suggestedName}</CardTitle>
+                      <p className="text-sm text-gray-600 mt-1">{device.suggestedLocation}</p>
+                    </div>
+                    <Badge className="bg-amber-200 text-amber-900 hover:bg-amber-200">Detected</Badge>
+                  </div>
+                  <p className="text-xs font-mono text-gray-500 mt-2">{device.deviceId}</p>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex items-center gap-1.5 text-gray-700">
+                      <Thermometer className="w-3.5 h-3.5" />
+                      {device.temperature.toFixed(1)}°C
+                    </div>
+                    <div className="flex items-center gap-1.5 text-gray-700">
+                      <Droplets className="w-3.5 h-3.5" />
+                      {device.humidity.toFixed(1)}%
+                    </div>
+                    <div className="flex items-center gap-1.5 text-gray-700">
+                      <Radio className="w-3.5 h-3.5" />
+                      {device.motionDetected ? "Motion" : "Clear"}
+                    </div>
+                    <div className="flex items-center gap-1.5 text-gray-700">
+                      <Target className="w-3.5 h-3.5" />
+                      {device.distanceCm != null ? `${device.distanceCm.toFixed(1)} cm` : "—"}
+                    </div>
+                  </div>
+                  {isAdmin && (
+                    <Button
+                      className="w-full bg-green-600 hover:bg-green-700"
+                      onClick={() => openRegisterDialog(device)}
+                    >
+                      <Plus className="w-4 h-4 mr-2" />
+                      Add Sensor
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Register detected device dialog */}
+      <Dialog
+        open={registerDialogOpen}
+        onOpenChange={(open) => {
+          setRegisterDialogOpen(open);
+          if (!open) setSelectedDevice(null);
+        }}
+      >
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Register Sensor</DialogTitle>
+            <DialogDescription>
+              Configure monitoring settings for{" "}
+              <span className="font-mono text-xs">{selectedDevice?.deviceId}</span>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="sensor-name">Sensor Name</Label>
+              <Input
+                id="sensor-name"
+                value={newSensorName}
+                onChange={(e) => setNewSensorName(e.target.value)}
+                placeholder="e.g., Gallery A - Artifact 1"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="sensor-location">Location</Label>
+              <Input
+                id="sensor-location"
+                value={newSensorLocation}
+                onChange={(e) => setNewSensorLocation(e.target.value)}
+                placeholder="e.g., Gallery A"
+              />
+            </div>
+            <div className="rounded-md bg-gray-50 border px-3 py-2 text-sm">
+              <p className="text-xs text-gray-500 uppercase tracking-wide">Device type</p>
+              <p className="font-medium text-gray-800">ESP32 environmental / proximity sensor</p>
+            </div>
+            <div className="space-y-2">
+              <Label>Temperature threshold (°C): {newTempThreshold}</Label>
+              <Slider
+                min={10}
+                max={40}
+                step={0.5}
+                value={[newTempThreshold]}
+                onValueChange={([v]) => setNewTempThreshold(v)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Humidity threshold (%): {newHumidityThreshold}</Label>
+              <Slider
+                min={20}
+                max={90}
+                step={1}
+                value={[newHumidityThreshold]}
+                onValueChange={([v]) => setNewHumidityThreshold(v)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Motion sensitivity (1–10): {newMotionThreshold}</Label>
+              <Slider
+                min={1}
+                max={10}
+                step={1}
+                value={[newMotionThreshold]}
+                onValueChange={([v]) => setNewMotionThreshold(v)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Distance limit (cm): {newDistanceThreshold}</Label>
+              <Slider
+                min={5}
+                max={500}
+                step={1}
+                value={[newDistanceThreshold]}
+                onValueChange={([v]) => setNewDistanceThreshold(v)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={handleCancelRegister}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-green-600 hover:bg-green-700"
+              disabled={!newSensorName.trim() || !newSensorLocation.trim()}
+              onClick={handlePrepareRegister}
+            >
+              Continue
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={confirmRegisterOpen} onOpenChange={setConfirmRegisterOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm Register Sensor</AlertDialogTitle>
+            <AlertDialogDescription>
+              Save &quot;{newSensorName}&quot; at &quot;{newSensorLocation}&quot; linked to{" "}
+              <span className="font-mono">{selectedDevice?.deviceId}</span>? It will appear under
+              registered sensors for monitoring and alerts.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleCancelRegister} disabled={registering}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-green-600 hover:bg-green-700"
+              disabled={registering}
+              onClick={(e) => {
+                e.preventDefault();
+                void handleConfirmRegister();
+              }}
+            >
+              {registering ? "Saving..." : "Save Sensor"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Registered Sensors */}
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900">Registered Sensors</h2>
+          <p className="text-sm text-gray-600 mt-1">
+            Official sensors available for monitoring and alerts
+          </p>
+        </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {activeSensors.length === 0 ? (
+          <Card className="md:col-span-2 lg:col-span-3 border border-dashed border-gray-300">
+            <CardContent className="py-10 text-center text-gray-500">
+              <p className="font-medium text-gray-700">No registered sensors yet</p>
+              <p className="text-sm mt-1">
+                Register a detected device above to start monitoring.
+              </p>
+            </CardContent>
+          </Card>
+        ) : null}
         {activeSensors.map((sensor) => {
           const isEditing = editingSensor === sensor.id;
           const currentTemp = isEditing ? tempSettings!.tempThreshold : sensor.tempThreshold;
@@ -285,7 +438,7 @@ export default function Sensors() {
                         <AlertDialogHeader>
                           <AlertDialogTitle>Delete Sensor</AlertDialogTitle>
                           <AlertDialogDescription>
-                            Permanently delete "{sensor.name}"? To reconnect this ESP later, Add Sensor with the same Hardware Device ID.
+                            Permanently delete &quot;{sensor.name}&quot;? If the device keeps reporting, it will appear under Detected Devices so you can Add Sensor again.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
@@ -611,6 +764,7 @@ export default function Sensors() {
           );
         })}
       </div>
+      </section>
 
       {/* Summary Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">

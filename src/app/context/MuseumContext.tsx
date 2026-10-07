@@ -25,6 +25,28 @@ export interface SensorData {
   archived: boolean; // Soft-delete flag
 }
 
+/** ESP/RTDB device seen live but not yet registered as a monitored sensor */
+export interface DetectedDevice {
+  deviceId: string;
+  suggestedName: string;
+  suggestedLocation: string;
+  temperature: number;
+  humidity: number;
+  motionDetected: boolean;
+  distanceCm?: number;
+  lastUpdated: Date;
+}
+
+export interface RegisterDetectedSensorInput {
+  deviceId: string;
+  name: string;
+  location: string;
+  tempThreshold: number;
+  humidityThreshold: number;
+  motionThreshold: number;
+  distanceThreshold: number;
+}
+
 const DISTANCE_CM_MIN = 5;
 const DISTANCE_CM_MAX = 10000; // 100 m
 const DISTANCE_CM_DEFAULT = 150;
@@ -157,6 +179,8 @@ export interface SystemSettings {
 
 interface MuseumContextType {
   sensors: SensorData[];
+  /** Live RTDB devices that are not registered sensors yet */
+  detectedDevices: DetectedDevice[];
   alerts: Alert[];
   logs: LogEntry[];
   settings: SystemSettings;
@@ -166,8 +190,8 @@ interface MuseumContextType {
   acknowledgeAlert: (alertId: string, acknowledgedBy?: string) => void;
   archiveSensor: (sensorId: string) => void;
   deleteSensor: (sensorId: string) => void;
-  /** Optional hardwareDeviceId must match Arduino DEVICE_ID (e.g. esp32_gallery_a_1) to link RTDB */
-  addSensor: (name: string, location: string, hardwareDeviceId?: string) => void;
+  /** Register a detected ESP device as an official monitored sensor */
+  registerDetectedSensor: (input: RegisterDetectedSensorInput) => Promise<void>;
   setNavigateToAlerts: (callback: () => void) => void;
   // Contact management
   addContact: (contact: Omit<Contact, 'id' | 'archived'>) => void;
@@ -244,6 +268,7 @@ async function seedFirestoreIfEmpty() {
 // ── Provider ──────────────────────────────────────────────────────
 export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const [sensors, setSensors] = useState<SensorData[]>([]);
+  const [detectedDevices, setDetectedDevices] = useState<DetectedDevice[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -274,51 +299,39 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     alertsRef.current = alerts;
   }, [alerts]);
 
+  /** Overlay live ESP readings onto registered sensors only — never invent new sensors */
   const mergeLiveOntoSensors = (firestoreSensors: SensorData[]): SensorData[] => {
-    const byId = new Map(firestoreSensors.map((s) => [s.id, s]));
+    return firestoreSensors.map((existing) => {
+      const live = liveReadingsRef.current[existing.id];
+      if (!live || deletedSensorIdsRef.current.has(existing.id)) {
+        return existing;
+      }
 
-    for (const [id, live] of Object.entries(liveReadingsRef.current)) {
-      if (deletedSensorIdsRef.current.has(id)) continue;
-      const existing = byId.get(id);
-      // Keep Firestore settings (thresholds). Only overlay live ESP readings.
-      const tempThreshold = existing?.tempThreshold ?? 24;
-      const humidityThreshold = existing?.humidityThreshold ?? 60;
-      const motionThreshold = existing?.motionThreshold ?? 5;
-      const distanceThreshold = existing?.distanceThreshold ?? DISTANCE_CM_DEFAULT;
-      const temperature = live.temperature ?? existing?.temperature ?? 20;
-      const humidity = live.humidity ?? existing?.humidity ?? 45;
-      const motionDetected = live.motionDetected ?? existing?.motionDetected ?? false;
-      const distanceCm = live.distanceCm ?? existing?.distanceCm;
+      const temperature = live.temperature ?? existing.temperature;
+      const humidity = live.humidity ?? existing.humidity;
+      const motionDetected = live.motionDetected ?? existing.motionDetected;
+      const distanceCm = live.distanceCm ?? existing.distanceCm;
 
       const status = computeSensorStatus({
         temperature,
         humidity,
         motionDetected,
         distanceCm,
-        tempThreshold,
-        humidityThreshold,
-        distanceThreshold,
+        tempThreshold: existing.tempThreshold,
+        humidityThreshold: existing.humidityThreshold,
+        distanceThreshold: existing.distanceThreshold,
       });
 
-      byId.set(id, {
-        id,
-        name: existing?.name || live.name || id,
-        location: existing?.location || live.location || "Unknown",
+      return {
+        ...existing,
         temperature,
         humidity,
         motionDetected,
         distanceCm,
         status,
-        lastUpdated: live.lastUpdated || existing?.lastUpdated || new Date(),
-        tempThreshold,
-        humidityThreshold,
-        motionThreshold,
-        distanceThreshold,
-        archived: existing?.archived ?? false,
-      });
-    }
-
-    return Array.from(byId.values());
+        lastUpdated: live.lastUpdated || existing.lastUpdated,
+      };
+    });
   };
 
   // ── 1. Seed Firestore on first mount (never block the UI if seed fails) ──
@@ -454,7 +467,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   }, [seeded]);
 
   // ── 2b. ESP32 live readings from RTDB /liveSensors ─────────────
-  // Shows on the dashboard immediately, and mirrors into Firestore when allowed.
+  // Registered sensors: overlay live readings + mirror readings to Firestore.
+  // Unregistered devices: show under "Detected devices" only — never auto-register.
   useEffect(() => {
     if (!seeded) return;
 
@@ -464,39 +478,54 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       (snap) => {
         const val = snap.val() as Record<string, any> | null;
         const ids = new Set<string>();
+        const detected: DetectedDevice[] = [];
         const mirrors: Array<{ deviceId: string; payload: Record<string, unknown> }> = [];
+        const registeredIds = new Set(sensorsRef.current.map((s) => s.id));
 
         if (val) {
           for (const [deviceId, raw] of Object.entries(val)) {
             if (!raw || typeof raw !== "object") continue;
-
-            // Admin deleted this device — ignore ESP/RTDB (do not recreate in UI/Firestore)
-            if (deletedSensorIdsRef.current.has(deviceId)) {
-              delete liveReadingsRef.current[deviceId];
-              continue;
-            }
 
             ids.add(deviceId);
 
             const temperature = Number(raw.temperature ?? 20);
             const humidity = Number(raw.humidity ?? 45);
             const motionDetected = Boolean(raw.motionDetected);
-            // ESP already sends cm — keep cm everywhere (no meter conversion)
             const distanceCm = parseDistanceCm(raw.distanceCm);
+            const suggestedName = String(raw.name || deviceId);
+            const suggestedLocation = String(raw.location || "Unknown");
+            const lastUpdated = new Date();
 
-            // Live overlay: readings only — never overwrite user threshold settings
             const livePartial: Partial<SensorData> = {
-              name: raw.name || deviceId,
-              location: raw.location || "Unknown",
+              name: suggestedName,
+              location: suggestedLocation,
               temperature,
               humidity,
               motionDetected,
               distanceCm,
-              lastUpdated: new Date(),
+              lastUpdated,
             };
-
             liveReadingsRef.current[deviceId] = livePartial;
 
+            // Deleted or never registered → detected only (user must Add Sensor)
+            const wasDeleted = deletedSensorIdsRef.current.has(deviceId);
+            const isRegistered = !wasDeleted && registeredIds.has(deviceId);
+
+            if (!isRegistered) {
+              detected.push({
+                deviceId,
+                suggestedName,
+                suggestedLocation,
+                temperature,
+                humidity,
+                motionDetected,
+                distanceCm,
+                lastUpdated,
+              });
+              continue;
+            }
+
+            // Registered only: mirror live readings (keep user name/thresholds in Firestore)
             const known = sensorsRef.current.find((s) => s.id === deviceId);
             const status = computeSensorStatus({
               temperature,
@@ -520,16 +549,21 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
                 hardware: true,
                 source: "esp32",
                 archived: false,
-                name: raw.name || deviceId,
-                location: raw.location || "Unknown",
               },
             });
           }
         }
 
-        liveHardwareIdsRef.current = ids;
+        // Drop live cache for devices that disappeared from RTDB
+        for (const id of Object.keys(liveReadingsRef.current)) {
+          if (!ids.has(id)) delete liveReadingsRef.current[id];
+        }
 
-        // Update UI immediately from RTDB — do NOT wait for Firestore writes
+        liveHardwareIdsRef.current = ids;
+        setDetectedDevices(
+          detected.sort((a, b) => a.deviceId.localeCompare(b.deviceId))
+        );
+
         setSensors((prev) => {
           const merged = mergeLiveOntoSensors(prev);
           queueMicrotask(() => {
@@ -538,7 +572,6 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           return merged;
         });
 
-        // Mirror to Firestore in the background (persistence only)
         for (const { deviceId, payload } of mirrors) {
           void setDoc(doc(db, "sensors", deviceId), payload, { merge: true }).catch(
             (err) => console.error("[LIVE] Firestore mirror failed for", deviceId, err)
@@ -928,50 +961,79 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       } catch (rtdbErr) {
         console.warn("[DELETE] RTDB cleanup skipped:", rtdbErr);
       }
-      toast.success("Sensor deleted. ESP will not bring it back.");
+      toast.success("Sensor deleted. It will show as Detected if the device is still online.");
     } catch (error) {
       console.error("Error deleting sensor:", error);
       toast.error("Failed to delete sensor");
     }
   };
 
-  const addSensor = async (name: string, location: string, hardwareDeviceId?: string) => {
-    try {
-      const deviceId = hardwareDeviceId?.trim();
-      const payload = {
-        name,
-        location,
-        temperature: 20,
-        humidity: 45,
-        motionDetected: false,
-        status: "safe" as const,
-        lastUpdated: Timestamp.now(),
-        tempThreshold: 24,
-        humidityThreshold: 60,
-        motionThreshold: settings.motionThreshold,
-        distanceThreshold: settings.distanceThreshold,
-        archived: false,
-        hardware: Boolean(deviceId),
-        source: deviceId ? "esp32" : "manual",
-      };
+  const registerDetectedSensor = async (input: RegisterDetectedSensorInput) => {
+    const deviceId = input.deviceId.trim();
+    if (!deviceId) {
+      toast.error("Missing hardware device ID");
+      return;
+    }
 
-      if (deviceId) {
-        // Re-link to ESP: must match Arduino DEVICE_ID and RTDB /liveSensors/{id}
-        deletedSensorIdsRef.current.delete(deviceId);
-        try {
-          await deleteDoc(doc(db, "deletedSensors", deviceId));
-        } catch {
-          /* may not exist */
-        }
-        await setDoc(doc(db, "sensors", deviceId), payload, { merge: true });
-        toast.success(`Sensor linked to hardware ID "${deviceId}"`);
-      } else {
-        await addDoc(collection(db, "sensors"), payload);
-        toast.success("Sensor added (not linked to ESP — add a Hardware Device ID to connect)");
+    const live = liveReadingsRef.current[deviceId];
+    const stillDetected = detectedDevices.some((d) => d.deviceId === deviceId);
+    if (!live && !stillDetected && !liveHardwareIdsRef.current.has(deviceId)) {
+      toast.error("That device is no longer detected. Wait for it to report again.");
+      return;
+    }
+
+    try {
+      deletedSensorIdsRef.current.delete(deviceId);
+      try {
+        await deleteDoc(doc(db, "deletedSensors", deviceId));
+      } catch {
+        /* may not exist */
       }
+
+      const temperature = live?.temperature ?? 20;
+      const humidity = live?.humidity ?? 45;
+      const motionDetected = live?.motionDetected ?? false;
+      const distanceCm = live?.distanceCm;
+      const distanceThreshold = normalizeThresholdCm(input.distanceThreshold);
+
+      const status = computeSensorStatus({
+        temperature,
+        humidity,
+        motionDetected,
+        distanceCm,
+        tempThreshold: input.tempThreshold,
+        humidityThreshold: input.humidityThreshold,
+        distanceThreshold,
+      });
+
+      await setDoc(
+        doc(db, "sensors", deviceId),
+        {
+          name: input.name.trim(),
+          location: input.location.trim(),
+          temperature,
+          humidity,
+          motionDetected,
+          distanceCm: distanceCm ?? null,
+          status,
+          lastUpdated: Timestamp.now(),
+          tempThreshold: input.tempThreshold,
+          humidityThreshold: input.humidityThreshold,
+          motionThreshold: input.motionThreshold,
+          distanceThreshold,
+          archived: false,
+          hardware: true,
+          source: "esp32",
+        },
+        { merge: true }
+      );
+
+      // Optimistically drop from detected list; RTDB tick will reconcile
+      setDetectedDevices((prev) => prev.filter((d) => d.deviceId !== deviceId));
+      toast.success(`Sensor "${input.name.trim()}" registered and ready for monitoring`);
     } catch (error) {
-      console.error("Error adding sensor:", error);
-      toast.error("Failed to add sensor");
+      console.error("Error registering detected sensor:", error);
+      toast.error("Failed to register sensor");
     }
   };
 
@@ -1017,6 +1079,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     <MuseumContext.Provider
       value={{
         sensors,
+        detectedDevices,
         alerts,
         logs,
         settings,
@@ -1026,7 +1089,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         acknowledgeAlert,
         archiveSensor,
         deleteSensor,
-        addSensor,
+        registerDetectedSensor,
         setNavigateToAlerts,
         addContact,
         updateContact,

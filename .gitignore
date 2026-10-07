@@ -12,3 +12,4 @@ dist-tsc
 *.local
 node_modules
 node_modules/
+.vercel
