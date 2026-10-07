@@ -1,8 +1,9 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getDatabase } from "firebase/database";
 
-// Your web app's Firebase configuration
+// Hiyas Museum — project: hiyas-museum-da909
 export const firebaseConfig = {
   apiKey: "AIzaSyAIM6uI6YqHUNcZ4628ITTkTsAZBa66_OA",
   authDomain: "hiyas-museum-da909.firebaseapp.com",
@@ -10,12 +11,12 @@ export const firebaseConfig = {
   projectId: "hiyas-museum-da909",
   storageBucket: "hiyas-museum-da909.firebasestorage.app",
   messagingSenderId: "204039084611",
-  appId: "1:204039084611:web:7d920f6436e03c8a6192f6"
+  appId: "1:204039084611:web:7d920f6436e03c8a6192f6",
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Services
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+/** Realtime Database — ESP32 writes live readings to /liveSensors/{deviceId} */
+export const rtdb = getDatabase(app);
