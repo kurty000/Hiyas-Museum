@@ -23,6 +23,11 @@ export interface ManagedUser {
   lockedUntil?: Date;
 }
 
+export type AddUserResult = {
+  uid: string;
+  linkedExistingAuth: boolean;
+};
+
 interface AuthContextType {
   user: User | null;
   login: (email: string, password: string) => Promise<{ success: boolean; error: string }>;
@@ -30,10 +35,19 @@ interface AuthContextType {
   isAdmin: boolean;
   // User management (Admin only)
   managedUsers: ManagedUser[];
-  addUser: (username: string, email: string, password: string, role: 'admin' | 'curator') => Promise<void>;
+  addUser: (
+    username: string,
+    email: string,
+    password: string,
+    role: 'admin' | 'curator'
+  ) => Promise<AddUserResult>;
   archiveUser: (id: string) => Promise<void>;
   updateUser: (id: string, updates: Partial<Pick<ManagedUser, 'username' | 'email' | 'role'>>) => Promise<void>;
   loading: boolean;
+}
+
+function normalizeRole(value: unknown): 'admin' | 'curator' {
+  return String(value || '').trim().toLowerCase() === 'admin' ? 'admin' : 'curator';
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -59,8 +73,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (userDoc.exists()) {
             const data = userDoc.data();
             setUser({
-              username: data.username || firebaseUser.email,
-              role: data.role || 'curator',
+              username: data.username || firebaseUser.email || 'User',
+              role: normalizeRole(data.role),
             });
             // Update last login
             await updateDoc(doc(db, 'users', firebaseUser.uid), {
@@ -99,19 +113,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const usersData: ManagedUser[] = [];
         snapshot.forEach((userSnap) => {
           const data = userSnap.data();
+          const createdAt =
+            typeof data.createdAt?.toDate === 'function'
+              ? data.createdAt.toDate()
+              : data.createdAt instanceof Date
+                ? data.createdAt
+                : new Date(0);
+          const lastLogin =
+            typeof data.lastLogin?.toDate === 'function'
+              ? data.lastLogin.toDate()
+              : data.lastLogin instanceof Date
+                ? data.lastLogin
+                : undefined;
           usersData.push({
             id: userSnap.id,
-            username: data.username || '',
+            username: data.username || data.email || userSnap.id,
             email: data.email || '',
-            role: data.role === 'admin' ? 'admin' : 'curator',
-            createdAt: data.createdAt?.toDate?.() || new Date(),
-            lastLogin: data.lastLogin?.toDate?.(),
+            role: normalizeRole(data.role),
+            createdAt,
+            lastLogin,
             archived: Boolean(data.archived),
-            failedAttempts: data.failedAttempts || 0,
-            lockedUntil: data.lockedUntil?.toDate?.(),
+            failedAttempts: Number(data.failedAttempts) || 0,
+            lockedUntil:
+              typeof data.lockedUntil?.toDate === 'function'
+                ? data.lockedUntil.toDate()
+                : undefined,
           });
         });
-        // Stable sort so new rows are easy to spot
         usersData.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
         setManagedUsers(usersData);
       },
@@ -180,23 +208,69 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   // --- User management ---
-  const addUser = async (username: string, email: string, password: string, role: 'admin' | 'curator') => {
+  // Any signed-in admin can create admin or curator accounts.
+  // Uses a secondary Firebase app so the admin session stays logged in.
+  // If Auth already has the email (orphaned login with no table row), signs in on
+  // the secondary app with the given password to recover the UID and upsert Firestore.
+  const addUser = async (
+    username: string,
+    email: string,
+    password: string,
+    role: 'admin' | 'curator'
+  ): Promise<AddUserResult> => {
     if (!auth.currentUser) {
       throw new Error('You must be signed in as an admin to create accounts.');
     }
-    if (user?.role !== 'admin') {
+    if (normalizeRole(user?.role) !== 'admin') {
       throw new Error('Only admins can create staff accounts.');
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedUsername = username.trim();
+    const normalizedRole = normalizeRole(role);
+
+    if (!normalizedUsername || !normalizedEmail || !password) {
+      throw new Error('Username, email, and password are required.');
+    }
+    if (password.length < 6) {
+      throw new Error('Password should be at least 6 characters.');
     }
 
     const secondaryApp = initializeApp(firebaseConfig, `SecondaryApp-${Date.now()}`);
     const secondaryAuth = getSecondaryAuth(secondaryApp);
+    let uid = '';
+    let linkedExistingAuth = false;
 
     try {
-      // Secondary app keeps the admin session on the primary app intact
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
-      const uid = userCredential.user.uid;
+      try {
+        const created = await createUserWithEmailAndPassword(
+          secondaryAuth,
+          normalizedEmail,
+          password
+        );
+        uid = created.user.uid;
+      } catch (createError: any) {
+        if (createError?.code !== 'auth/email-already-in-use') {
+          throw createError;
+        }
 
-      // Sign out the new user from the secondary app before tearing it down
+        // Auth user exists (often from a previous create that never wrote Firestore).
+        // Sign in on the secondary app to resolve UID, then upsert the staff profile.
+        try {
+          const existingAuth = await signInWithEmailAndPassword(
+            secondaryAuth,
+            normalizedEmail,
+            password
+          );
+          uid = existingAuth.user.uid;
+          linkedExistingAuth = true;
+        } catch {
+          throw new Error(
+            'This email already has a login. Use that account’s current password to add it to the table, or pick a different email.'
+          );
+        }
+      }
+
       try {
         await signOut(secondaryAuth);
       } catch {
@@ -206,45 +280,71 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!auth.currentUser) {
         throw new Error('Admin session was lost while creating the account. Please sign in again.');
       }
+      if (!uid) {
+        throw new Error('Could not resolve the new user id.');
+      }
+
+      const userRef = doc(db, 'users', uid);
+      const existing = await getDoc(userRef);
+      const createdAt =
+        existing.exists() && existing.data()?.createdAt
+          ? existing.data()!.createdAt
+          : Timestamp.now();
 
       const profile = {
-        username: username.trim(),
-        email: email.trim().toLowerCase(),
-        role,
-        createdAt: Timestamp.now(),
+        username: normalizedUsername,
+        email: normalizedEmail,
+        role: normalizedRole,
+        createdAt,
         archived: false,
-        failedAttempts: 0,
+        failedAttempts: existing.exists()
+          ? Number(existing.data()?.failedAttempts) || 0
+          : 0,
+        updatedAt: Timestamp.now(),
       };
 
-      // Primary app auth (admin) writes the Firestore profile so it shows in the table
-      await setDoc(doc(db, 'users', uid), profile);
+      // Admin (primary auth) writes/merges Firestore so the row appears in Account Management
+      await setDoc(userRef, profile, { merge: true });
 
-      // Optimistic UI — onSnapshot will reconcile shortly after
+      const createdAtDate =
+        typeof createdAt?.toDate === 'function' ? createdAt.toDate() : new Date();
+
       setManagedUsers((prev) => {
-        if (prev.some((u) => u.id === uid)) return prev;
-        return [
-          {
-            id: uid,
-            username: profile.username,
-            email: profile.email,
-            role,
-            createdAt: new Date(),
-            archived: false,
-            failedAttempts: 0,
-          },
-          ...prev,
-        ];
+        const row: ManagedUser = {
+          id: uid,
+          username: normalizedUsername,
+          email: normalizedEmail,
+          role: normalizedRole,
+          createdAt: createdAtDate,
+          lastLogin:
+            typeof existing.data()?.lastLogin?.toDate === 'function'
+              ? existing.data()!.lastLogin.toDate()
+              : undefined,
+          archived: false,
+          failedAttempts: profile.failedAttempts,
+        };
+        const others = prev.filter(
+          (u) => u.id !== uid && u.email.trim().toLowerCase() !== normalizedEmail
+        );
+        return [row, ...others];
       });
+
+      return { uid, linkedExistingAuth };
     } catch (error: any) {
       console.error('Error adding user', error);
-      if (error?.code === 'auth/email-already-in-use') {
-        throw new Error('That email is already registered.');
-      }
       if (error?.code === 'auth/weak-password') {
         throw new Error('Password should be at least 6 characters.');
       }
+      if (error?.code === 'auth/invalid-email') {
+        throw new Error('Please enter a valid email address.');
+      }
       if (error?.code === 'permission-denied') {
-        throw new Error('Firestore blocked saving the user profile. Deploy updated security rules or check admin role.');
+        throw new Error(
+          'Firestore blocked saving the user profile. Your account must have role "admin" in Firestore.'
+        );
+      }
+      if (error instanceof Error && error.message) {
+        throw error;
       }
       throw new Error(error?.message || 'Failed to create account.');
     } finally {
