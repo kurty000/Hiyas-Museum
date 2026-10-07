@@ -657,45 +657,32 @@ export const MuseumProvider = ({
     }
   };
 
-  const addSensor = async (
-    name: string,
-    location: string
-  ) => {
-    try {
-      await addDoc(
-        collection(db, "sensors"),
-        {
-          name,
-          location,
-          temperature: 20,
-          humidity: 45,
-          motionDetected: false,
-          status: "safe",
-          lastUpdated: Timestamp.now(),
-          tempThreshold: 24,
-          humidityThreshold: 60,
-          motionThreshold:
-            settings.motionThreshold,
-          distanceThreshold:
-            settings.distanceThreshold,
-          archived: false,
-        }
-      );
+ const addSensor = async (name: string, location: string) => {
+  try {
+    const sensorRef = doc(collection(db, "sensors"));
 
-      toast.success(
-        "Sensor added successfully"
-      );
-    } catch (error) {
-      console.error(
-        "Error adding sensor:",
-        error
-      );
+    await setDoc(sensorRef, {
+      name,
+      location,
+      temperature: 0,
+      humidity: 0,
+      motionDetected: false,
+      status: "offline",
+      lastUpdated: Timestamp.now(),
 
-      toast.error(
-        "Failed to add sensor"
-      );
-    }
-  };
+      tempThreshold: 24,
+      humidityThreshold: 60,
+      motionThreshold: 5,
+      distanceThreshold: 1.5,
+
+      archived: false,
+    });
+
+    console.log("Sensor added successfully:", sensorRef.id);
+  } catch (error) {
+    console.error("Error adding sensor:", error);
+  }
+};
 
   const setNavigateToAlerts = (
     callback: () => void
