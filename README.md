@@ -41,3 +41,24 @@ An interactive and real-time IoT dashboard designed for the Hiyas Museum. This s
    ```bash
    npm run build
    ```
+
+
+## Firebase security
+
+Project: `hiyas-museum-da909`
+
+Deploy rules after login:
+
+```bash
+npx firebase login
+npm run firebase:deploy-rules
+```
+
+Also add `hiyas-museum.vercel.app` under Firebase Console → Authentication → Settings → Authorized domains.
+
+### Environment variables (Vercel `/api/sensors`)
+
+- `FIREBASE_PROJECT_ID`
+- `FIREBASE_CLIENT_EMAIL`
+- `FIREBASE_PRIVATE_KEY`
+- `SENSOR_API_KEY`
