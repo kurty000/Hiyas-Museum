@@ -14,51 +14,66 @@ export interface SensorData {
   temperature: number;
   humidity: number;
   motionDetected: boolean;
-  /** Latest distance reading in meters (converted from ESP once at ingest). */
-  distanceM?: number;
+  /** Latest distance reading in cm (same unit as ESP HC-SR04). */
+  distanceCm?: number;
   status: "safe" | "warning" | "critical" | "offline";
   lastUpdated: Date;
   tempThreshold: number; // Temperature threshold in °C
   humidityThreshold: number; // Humidity threshold in %
   motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-100) — breach when reading reaches/exceeds this
+  distanceThreshold: number; // cm (5–10000) — breach when object is at/closer than this
   archived: boolean; // Soft-delete flag
 }
 
-/** Convert ESP distanceCm → meters. Returns null for timeout/invalid (e.g. 999). */
-function toDistanceMeters(rawCm: unknown): number | undefined {
+const DISTANCE_CM_MIN = 5;
+const DISTANCE_CM_MAX = 10000; // 100 m
+const DISTANCE_CM_DEFAULT = 150;
+
+/** Parse ESP/Firestore distance as cm. Returns undefined for timeout/invalid (e.g. 999). */
+function parseDistanceCm(rawCm: unknown): number | undefined {
   if (rawCm == null || Number.isNaN(Number(rawCm))) return undefined;
   const cm = Number(rawCm);
   // ESP sketch uses 999 as no-reading sentinel
   if (cm < 0 || cm >= 900) return undefined;
-  return cm / 100;
+  return cm;
 }
 
-/** Derive dashboard status from live readings + website threshold settings (meters only). */
+/**
+ * Normalize threshold to cm.
+ * Legacy meter values were often < 5 (e.g. 0.05, 1.5) — convert those ×100.
+ */
+function normalizeThresholdCm(raw: unknown): number {
+  const n = Number(raw);
+  if (Number.isNaN(n)) return DISTANCE_CM_DEFAULT;
+  const asCm = n > 0 && n < DISTANCE_CM_MIN ? n * 100 : n;
+  return Math.min(DISTANCE_CM_MAX, Math.max(DISTANCE_CM_MIN, asCm));
+}
+
+/** Derive dashboard status from live readings + website threshold settings (cm only). */
 function computeSensorStatus(input: {
   temperature: number;
   humidity: number;
   motionDetected: boolean;
-  distanceM?: number;
+  distanceCm?: number;
   tempThreshold: number;
   humidityThreshold: number;
-  distanceThreshold: number; // meters
+  distanceThreshold: number; // cm
 }): SensorData["status"] {
   const {
     temperature,
     humidity,
     motionDetected,
-    distanceM,
+    distanceCm,
     tempThreshold,
     humidityThreshold,
     distanceThreshold,
   } = input;
 
-  // Breach only when distance reading reaches or exceeds the set meter limit
-  const reachedDistanceLimit =
-    distanceM != null && distanceM >= distanceThreshold;
+  // Breach when object is at or closer than the set cm limit (HCSR proximity)
+  const tooClose =
+    distanceCm != null && distanceCm <= distanceThreshold;
 
-  if (motionDetected || reachedDistanceLimit) return "critical";
+  if (motionDetected || tooClose) return "critical";
 
   if (temperature > tempThreshold + 2 || humidity > humidityThreshold + 10) {
     return "critical";
@@ -106,7 +121,7 @@ export interface Contact {
 
 export interface SystemSettings {
   motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-100)
+  distanceThreshold: number; // cm (5–10000)
   motionSensitivity: "low" | "medium" | "high";
   emailAlerts: boolean;
   telegramAlerts: boolean;
@@ -144,7 +159,7 @@ const MuseumContext = createContext<MuseumContextType | undefined>(undefined);
 // Default settings used for seeding and fallback
 const DEFAULT_SETTINGS: SystemSettings = {
   motionThreshold: 5,
-  distanceThreshold: 1.5,
+  distanceThreshold: DISTANCE_CM_DEFAULT,
   motionSensitivity: "medium",
   emailAlerts: true,
   telegramAlerts: true,
@@ -188,7 +203,7 @@ const generateInitialSensors = (): Omit<SensorData, 'id'>[] => {
         tempThreshold: 24,
         humidityThreshold: 60,
         motionThreshold: 5,
-        distanceThreshold: 1.5,
+        distanceThreshold: DISTANCE_CM_DEFAULT,
         archived: false,
       });
     });
@@ -292,17 +307,17 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       const tempThreshold = existing?.tempThreshold ?? 24;
       const humidityThreshold = existing?.humidityThreshold ?? 60;
       const motionThreshold = existing?.motionThreshold ?? 5;
-      const distanceThreshold = existing?.distanceThreshold ?? 1.5;
+      const distanceThreshold = existing?.distanceThreshold ?? DISTANCE_CM_DEFAULT;
       const temperature = live.temperature ?? existing?.temperature ?? 20;
       const humidity = live.humidity ?? existing?.humidity ?? 45;
       const motionDetected = live.motionDetected ?? existing?.motionDetected ?? false;
-      const distanceM = live.distanceM ?? existing?.distanceM;
+      const distanceCm = live.distanceCm ?? existing?.distanceCm;
 
       const status = computeSensorStatus({
         temperature,
         humidity,
         motionDetected,
-        distanceM,
+        distanceCm,
         tempThreshold,
         humidityThreshold,
         distanceThreshold,
@@ -315,7 +330,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         temperature,
         humidity,
         motionDetected,
-        distanceM,
+        distanceCm,
         status,
         lastUpdated: live.lastUpdated || existing?.lastUpdated || new Date(),
         tempThreshold,
@@ -352,16 +367,19 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           temperature: raw.temperature ?? 20,
           humidity: raw.humidity ?? 45,
           motionDetected: raw.motionDetected ?? false,
-          distanceM:
-            raw.distanceM != null
-              ? Number(raw.distanceM)
-              : toDistanceMeters(raw.distanceCm),
+          distanceCm:
+            raw.distanceCm != null
+              ? parseDistanceCm(raw.distanceCm)
+              : raw.distanceM != null
+                // Legacy Firestore field stored meters — convert to cm
+                ? Number(raw.distanceM) * 100
+                : undefined,
           status: raw.status || 'safe',
           lastUpdated: toDate(raw.lastUpdated) || new Date(),
           tempThreshold: raw.tempThreshold ?? 24,
           humidityThreshold: raw.humidityThreshold ?? 60,
           motionThreshold: raw.motionThreshold ?? 5,
-          distanceThreshold: raw.distanceThreshold ?? 1.5,
+          distanceThreshold: normalizeThresholdCm(raw.distanceThreshold),
           archived: raw.archived ?? false,
         });
       });
@@ -465,64 +483,60 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     const liveRef = rtdbRef(rtdb, "liveSensors");
     const unsubLive = onValue(
       liveRef,
-      async (snap) => {
-      const val = snap.val() as Record<string, any> | null;
-      const ids = new Set<string>();
+      (snap) => {
+        const val = snap.val() as Record<string, any> | null;
+        const ids = new Set<string>();
+        const mirrors: Array<{ deviceId: string; payload: Record<string, unknown> }> = [];
 
-      if (val) {
-        for (const [deviceId, raw] of Object.entries(val)) {
-          if (!raw || typeof raw !== "object") continue;
+        if (val) {
+          for (const [deviceId, raw] of Object.entries(val)) {
+            if (!raw || typeof raw !== "object") continue;
 
-          // Admin deleted this device — ignore ESP/RTDB (do not recreate in UI/Firestore)
-          if (deletedSensorIdsRef.current.has(deviceId)) {
-            delete liveReadingsRef.current[deviceId];
-            continue;
-          }
+            // Admin deleted this device — ignore ESP/RTDB (do not recreate in UI/Firestore)
+            if (deletedSensorIdsRef.current.has(deviceId)) {
+              delete liveReadingsRef.current[deviceId];
+              continue;
+            }
 
-          ids.add(deviceId);
+            ids.add(deviceId);
 
-          const temperature = Number(raw.temperature ?? 20);
-          const humidity = Number(raw.humidity ?? 45);
-          const motionDetected = Boolean(raw.motionDetected);
-          // Convert ESP cm → meters once; all app logic uses meters only
-          const distanceM =
-            raw.distanceM != null
-              ? Number(raw.distanceM)
-              : toDistanceMeters(raw.distanceCm);
+            const temperature = Number(raw.temperature ?? 20);
+            const humidity = Number(raw.humidity ?? 45);
+            const motionDetected = Boolean(raw.motionDetected);
+            // ESP already sends cm — keep cm everywhere (no meter conversion)
+            const distanceCm = parseDistanceCm(raw.distanceCm);
 
-          // Live overlay: readings only — never overwrite user threshold settings
-          const livePartial: Partial<SensorData> = {
-            name: raw.name || deviceId,
-            location: raw.location || "Unknown",
-            temperature,
-            humidity,
-            motionDetected,
-            distanceM,
-            lastUpdated: new Date(),
-          };
+            // Live overlay: readings only — never overwrite user threshold settings
+            const livePartial: Partial<SensorData> = {
+              name: raw.name || deviceId,
+              location: raw.location || "Unknown",
+              temperature,
+              humidity,
+              motionDetected,
+              distanceCm,
+              lastUpdated: new Date(),
+            };
 
-          liveReadingsRef.current[deviceId] = livePartial;
+            liveReadingsRef.current[deviceId] = livePartial;
 
-          const known = sensorsRef.current.find((s) => s.id === deviceId);
-          const status = computeSensorStatus({
-            temperature,
-            humidity,
-            motionDetected,
-            distanceM,
-            tempThreshold: known?.tempThreshold ?? 24,
-            humidityThreshold: known?.humidityThreshold ?? 60,
-            distanceThreshold: known?.distanceThreshold ?? 1.5,
-          });
+            const known = sensorsRef.current.find((s) => s.id === deviceId);
+            const status = computeSensorStatus({
+              temperature,
+              humidity,
+              motionDetected,
+              distanceCm,
+              tempThreshold: known?.tempThreshold ?? 24,
+              humidityThreshold: known?.humidityThreshold ?? 60,
+              distanceThreshold: known?.distanceThreshold ?? DISTANCE_CM_DEFAULT,
+            });
 
-          // Mirror live readings into Firestore only (do not touch thresholds)
-          try {
-            await setDoc(
-              doc(db, "sensors", deviceId),
-              {
+            mirrors.push({
+              deviceId,
+              payload: {
                 temperature,
                 humidity,
                 motionDetected,
-                distanceM: distanceM ?? null,
+                distanceCm: distanceCm ?? null,
                 status,
                 lastUpdated: Timestamp.now(),
                 hardware: true,
@@ -531,25 +545,27 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
                 name: raw.name || deviceId,
                 location: raw.location || "Unknown",
               },
-              { merge: true }
-            );
-          } catch (err) {
-            console.error("[LIVE] Firestore mirror failed for", deviceId, err);
+            });
           }
         }
-      }
 
-      liveHardwareIdsRef.current = ids;
+        liveHardwareIdsRef.current = ids;
 
-      // Push live ESP values into the UI immediately (do not wait for Firestore)
-      // and evaluate alerts against website thresholds (ESP path used to skip alerts)
-      setSensors((prev) => {
-        const merged = mergeLiveOntoSensors(prev);
-        queueMicrotask(() => {
-          void publishAlertsRef.current(merged);
+        // Update UI immediately from RTDB — do NOT wait for Firestore writes
+        setSensors((prev) => {
+          const merged = mergeLiveOntoSensors(prev);
+          queueMicrotask(() => {
+            void publishAlertsRef.current(merged);
+          });
+          return merged;
         });
-        return merged;
-      });
+
+        // Mirror to Firestore in the background (persistence only)
+        for (const { deviceId, payload } of mirrors) {
+          void setDoc(doc(db, "sensors", deviceId), payload, { merge: true }).catch(
+            (err) => console.error("[LIVE] Firestore mirror failed for", deviceId, err)
+          );
+        }
       },
       (err) => {
         console.error("[LIVE] RTDB /liveSensors read failed:", err);
@@ -636,18 +652,18 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         motionAlertCount++;
       }
 
-      // Distance: breach when reading reaches or exceeds set meter limit
-      const limitM = sensor.distanceThreshold;
-      const distM = sensor.distanceM;
+      // Distance: breach when at or closer than set cm limit
+      const limitCm = sensor.distanceThreshold;
+      const distCm = sensor.distanceCm;
       if (
-        distM != null &&
-        distM >= limitM &&
+        distCm != null &&
+        distCm <= limitCm &&
         motionAlertCount < maxMotionAlerts
       ) {
         newAlerts.push({
           type: "security",
           severity: "critical",
-          message: `⚠️ DISTANCE LIMIT: ${distM.toFixed(2)} m reached/exceeded limit ${limitM.toFixed(1)} m at ${sensor.name}`,
+          message: `⚠️ PROXIMITY BREACH: Object at ${distCm.toFixed(1)} cm (limit ${limitCm.toFixed(0)} cm) at ${sensor.name}`,
           sensorId: sensor.id,
           timestamp: new Date(),
           acknowledged: false,
@@ -834,7 +850,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
   const updateSensorSettings = async (sensorId: string, tempThreshold: number, humidityThreshold: number, motionThreshold: number, distanceThreshold: number) => {
     try {
-      const clampedDistance = Math.min(100, Math.max(0.5, distanceThreshold));
+      const clampedDistance = normalizeThresholdCm(distanceThreshold);
       await updateDoc(doc(db, "sensors", sensorId), {
         tempThreshold, humidityThreshold, motionThreshold, distanceThreshold: clampedDistance
       });
