@@ -46,6 +46,7 @@ export default function Sensors() {
   const [savingSensorId, setSavingSensorId] = useState<string | null>(null);
   const [newSensorName, setNewSensorName] = useState("");
   const [newSensorLocation, setNewSensorLocation] = useState("");
+  const [newSensorDeviceId, setNewSensorDeviceId] = useState("esp32_gallery_a_1");
 
   // Only show non-archived sensors
   const activeSensors = sensors.filter(s => !s.archived);
@@ -104,16 +105,18 @@ export default function Sensors() {
   };
 
   const handleConfirmAddSensor = () => {
-    addSensor(newSensorName, newSensorLocation);
+    addSensor(newSensorName, newSensorLocation, newSensorDeviceId.trim() || undefined);
     setConfirmAddDialogOpen(false);
     setNewSensorName("");
     setNewSensorLocation("");
+    setNewSensorDeviceId("esp32_gallery_a_1");
   };
 
   const handleCancelAddSensor = () => {
     setConfirmAddDialogOpen(false);
     setNewSensorName("");
     setNewSensorLocation("");
+    setNewSensorDeviceId("esp32_gallery_a_1");
   };
 
   return (
@@ -162,6 +165,23 @@ export default function Sensors() {
                     className="w-full"
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sensor-device-id" className="text-sm font-medium text-gray-700">
+                    Hardware Device ID (ESP32)
+                  </Label>
+                  <Input
+                    id="sensor-device-id"
+                    placeholder="esp32_gallery_a_1"
+                    value={newSensorDeviceId}
+                    onChange={(e) => setNewSensorDeviceId(e.target.value)}
+                    className="w-full font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-500">
+                    Must match the Arduino <code className="bg-gray-100 px-1 rounded">DEVICE_ID</code> and
+                    Realtime Database path <code className="bg-gray-100 px-1 rounded">liveSensors/…</code>.
+                    Leave empty only for a manual (non-ESP) sensor.
+                  </p>
+                </div>
               </div>
               <DialogFooter>
                 <Button
@@ -188,7 +208,10 @@ export default function Sensors() {
             <AlertDialogHeader>
               <AlertDialogTitle>Confirm Add Sensor</AlertDialogTitle>
               <AlertDialogDescription>
-                Are you sure you want to add the sensor "{newSensorName}" at location "{newSensorLocation}"?
+                Add "{newSensorName}" at "{newSensorLocation}"
+                {newSensorDeviceId.trim()
+                  ? ` linked to hardware ID "${newSensorDeviceId.trim()}" (Realtime DB)?`
+                  : " as a manual sensor (not linked to ESP)?"}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
