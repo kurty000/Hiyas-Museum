@@ -363,13 +363,13 @@ export default function Sensors() {
                   </div>
                 </div>
 
-                {/* Motion / Distance — meters only */}
+                {/* Motion / Distance — cm only */}
                 {(() => {
-                  const limitM = sensor.distanceThreshold;
-                  const distM = sensor.distanceM;
-                  // Breach only when reading reaches or exceeds the set meter limit
-                  const reachedLimit = distM != null && distM >= limitM;
-                  const breach = sensor.motionDetected || reachedLimit;
+                  const limitCm = sensor.distanceThreshold;
+                  const distCm = sensor.distanceCm;
+                  // Breach when object is at or closer than the set cm limit
+                  const tooClose = distCm != null && distCm <= limitCm;
+                  const breach = sensor.motionDetected || tooClose;
                   return (
                     <div
                       className={`flex items-center justify-between p-3 rounded-lg ${
@@ -398,9 +398,9 @@ export default function Sensors() {
                             {breach ? "Breach!" : "Safe"}
                           </p>
                           <p className="text-xs text-gray-500">
-                            {distM != null
-                              ? `${distM.toFixed(2)} m / limit ${limitM.toFixed(1)} m`
-                              : `No reading / limit ${limitM.toFixed(1)} m`}
+                            {distCm != null
+                              ? `${distCm.toFixed(1)} cm / limit ${limitCm.toFixed(0)} cm`
+                              : `No reading / limit ${limitCm.toFixed(0)} cm`}
                           </p>
                         </div>
                       </div>
@@ -539,7 +539,7 @@ export default function Sensors() {
                         )}
                       </div>
 
-                      {/* Distance Threshold = breach when reading reaches/exceeds this (meters) */}
+                      {/* Distance Threshold = breach when at/closer than this (cm) */}
                       <div className="space-y-2">
                         <div className="flex items-center gap-2">
                           <Target className="w-4 h-4 text-blue-600" />
@@ -547,19 +547,16 @@ export default function Sensors() {
                             Distance Threshold
                           </Label>
                           <span className="text-xs font-semibold text-blue-600 ml-auto">
-                            {currentDistance.toFixed(1)}m
+                            {currentDistance.toFixed(0)} cm
                           </span>
                         </div>
-                        <p className="text-xs text-gray-500">
-                          Breach when reading is <span className="font-medium">at or above</span> this limit (meters). Below = Safe.
-                        </p>
                         {isEditing ? (
                           <>
                             <Slider
-                              min={0.5}
-                              max={100}
-                              step={0.5}
-                              value={[Math.min(currentDistance, 100)]}
+                              min={5}
+                              max={10000}
+                              step={1}
+                              value={[Math.min(Math.max(currentDistance, 5), 10000)]}
                               onValueChange={(value) =>
                                 setTempSettings({
                                   ...tempSettings!,
@@ -569,21 +566,21 @@ export default function Sensors() {
                               className="w-full"
                             />
                             <div className="flex justify-between text-xs text-gray-500">
-                              <span>0.5m</span>
-                              <span>100m</span>
+                              <span>5 cm</span>
+                              <span>10000 cm (100 m)</span>
                             </div>
                             <Input
                               type="number"
-                              min={0.5}
-                              max={100}
-                              step={0.5}
+                              min={5}
+                              max={10000}
+                              step={1}
                               value={currentDistance}
                               onChange={(e) => {
                                 const n = Number(e.target.value);
                                 if (Number.isNaN(n)) return;
                                 setTempSettings({
                                   ...tempSettings!,
-                                  distanceThreshold: Math.min(100, Math.max(0.5, n)),
+                                  distanceThreshold: Math.min(10000, Math.max(5, n)),
                                 });
                               }}
                               className="w-full h-8 text-sm"
@@ -592,7 +589,7 @@ export default function Sensors() {
                         ) : (
                           <div className="bg-blue-50 border border-blue-200 rounded px-3 py-2">
                             <p className="text-sm font-medium text-blue-700">
-                              {currentDistance.toFixed(1)}m
+                              {currentDistance.toFixed(0)} cm
                             </p>
                           </div>
                         )}
