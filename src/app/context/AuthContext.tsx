@@ -1,7 +1,14 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { initializeApp, deleteApp } from 'firebase/app';
-import { signInWithEmailAndPassword, signOut, onAuthStateChanged, getAuth as getSecondaryAuth, createUserWithEmailAndPassword } from 'firebase/auth';
-import { collection, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp } from 'firebase/firestore';
+import {
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  initializeAuth,
+  inMemoryPersistence,
+} from 'firebase/auth';
+import { collection, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp, getFirestore } from 'firebase/firestore';
 import { auth, db, firebaseConfig } from '../firebase';
 import { toast } from 'sonner';
 
@@ -209,22 +216,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // --- User management ---
   // Any signed-in admin can create admin or curator accounts.
-  // Uses a secondary Firebase app so the admin session stays logged in.
-  // If Auth already has the email (orphaned login with no table row), signs in on
-  // the secondary app with the given password to recover the UID and upsert Firestore.
+  // Secondary Firebase app uses in-memory auth so the admin session is never replaced.
+  // Profile is written with the NEW user's secondary session (self-doc create/update),
+  // which Firestore allows — then the admin table listener picks it up in realtime.
   const addUser = async (
     username: string,
     email: string,
     password: string,
     role: 'admin' | 'curator'
   ): Promise<AddUserResult> => {
-    if (!auth.currentUser) {
+    const adminUser = auth.currentUser;
+    if (!adminUser) {
       throw new Error('You must be signed in as an admin to create accounts.');
     }
     if (normalizeRole(user?.role) !== 'admin') {
       throw new Error('Only admins can create staff accounts.');
     }
 
+    const adminUid = adminUser.uid;
     const normalizedEmail = email.trim().toLowerCase();
     const normalizedUsername = username.trim();
     const normalizedRole = normalizeRole(role);
@@ -237,7 +246,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const secondaryApp = initializeApp(firebaseConfig, `SecondaryApp-${Date.now()}`);
-    const secondaryAuth = getSecondaryAuth(secondaryApp);
+    // Isolated in-memory auth — must NOT use default persistence (that can log the admin out)
+    const secondaryAuth = initializeAuth(secondaryApp, {
+      persistence: inMemoryPersistence,
+    });
+    const secondaryDb = getFirestore(secondaryApp);
     let uid = '';
     let linkedExistingAuth = false;
 
@@ -255,7 +268,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         // Auth user exists (often from a previous create that never wrote Firestore).
-        // Sign in on the secondary app to resolve UID, then upsert the staff profile.
         try {
           const existingAuth = await signInWithEmailAndPassword(
             secondaryAuth,
@@ -271,20 +283,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      try {
-        await signOut(secondaryAuth);
-      } catch {
-        /* ignore */
-      }
-
-      if (!auth.currentUser) {
-        throw new Error('Admin session was lost while creating the account. Please sign in again.');
-      }
-      if (!uid) {
+      if (!uid || !secondaryAuth.currentUser) {
         throw new Error('Could not resolve the new user id.');
       }
 
-      const userRef = doc(db, 'users', uid);
+      const userRef = doc(secondaryDb, 'users', uid);
       const existing = await getDoc(userRef);
       const createdAt =
         existing.exists() && existing.data()?.createdAt
@@ -303,8 +306,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         updatedAt: Timestamp.now(),
       };
 
-      // Admin (primary auth) writes/merges Firestore so the row appears in Account Management
+      // Write WHILE secondary session is the new user (allowed as own profile doc)
       await setDoc(userRef, profile, { merge: true });
+
+      try {
+        await signOut(secondaryAuth);
+      } catch {
+        /* ignore */
+      }
+
+      // Ensure admin session is still the primary app user
+      if (!auth.currentUser || auth.currentUser.uid !== adminUid) {
+        throw new Error(
+          'Admin session changed while creating the account. Please sign in again as admin and retry.'
+        );
+      }
 
       const createdAtDate =
         typeof createdAt?.toDate === 'function' ? createdAt.toDate() : new Date();
@@ -340,7 +356,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       if (error?.code === 'permission-denied') {
         throw new Error(
-          'Firestore blocked saving the user profile. Your account must have role "admin" in Firestore.'
+          'Firestore blocked saving the user profile. Try again, or check Authentication / Firestore users.'
         );
       }
       if (error instanceof Error && error.message) {
