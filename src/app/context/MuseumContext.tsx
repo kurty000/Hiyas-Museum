@@ -21,7 +21,7 @@ export interface SensorData {
   tempThreshold: number; // Temperature threshold in °C
   humidityThreshold: number; // Humidity threshold in %
   motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-100) — breach when object is at/closer than this
+  distanceThreshold: number; // in meters (0.5-100) — breach when reading reaches/exceeds this
   archived: boolean; // Soft-delete flag
 }
 
@@ -54,11 +54,11 @@ function computeSensorStatus(input: {
     distanceThreshold,
   } = input;
 
-  // Breach only when object is at or closer than the set meter limit
-  const atOrCloserThanLimit =
-    distanceM != null && distanceM <= distanceThreshold;
+  // Breach only when distance reading reaches or exceeds the set meter limit
+  const reachedDistanceLimit =
+    distanceM != null && distanceM >= distanceThreshold;
 
-  if (motionDetected || atOrCloserThanLimit) return "critical";
+  if (motionDetected || reachedDistanceLimit) return "critical";
 
   if (temperature > tempThreshold + 2 || humidity > humidityThreshold + 10) {
     return "critical";
@@ -636,18 +636,18 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         motionAlertCount++;
       }
 
-      // Distance: breach when at or closer than set meter limit
+      // Distance: breach when reading reaches or exceeds set meter limit
       const limitM = sensor.distanceThreshold;
       const distM = sensor.distanceM;
       if (
         distM != null &&
-        distM <= limitM &&
+        distM >= limitM &&
         motionAlertCount < maxMotionAlerts
       ) {
         newAlerts.push({
           type: "security",
           severity: "critical",
-          message: `⚠️ PROXIMITY BREACH: Object at ${distM.toFixed(2)} m (limit ${limitM.toFixed(1)} m) at ${sensor.name}`,
+          message: `⚠️ DISTANCE LIMIT: ${distM.toFixed(2)} m reached/exceeded limit ${limitM.toFixed(1)} m at ${sensor.name}`,
           sensorId: sensor.id,
           timestamp: new Date(),
           acknowledged: false,
