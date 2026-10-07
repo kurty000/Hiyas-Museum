@@ -263,12 +263,17 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const deletedSensorIdsRef = useRef<Set<string>>(new Set());
   /** Latest sensors snapshot for threshold lookup during RTDB sync */
   const sensorsRef = useRef<SensorData[]>([]);
+  const alertsRef = useRef<Alert[]>([]);
 
   const navigateToAlertsRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     sensorsRef.current = sensors;
   }, [sensors]);
+
+  useEffect(() => {
+    alertsRef.current = alerts;
+  }, [alerts]);
 
   const mergeLiveOntoSensors = (firestoreSensors: SensorData[]): SensorData[] => {
     const byId = new Map(firestoreSensors.map((s) => [s.id, s]));
@@ -612,9 +617,89 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         });
         motionAlertCount++;
       }
+
+      // Distance / proximity threshold (ESP distanceCm vs website meters setting)
+      const limitCm = sensor.distanceThreshold * 100;
+      const tooClose =
+        sensor.distanceCm != null &&
+        sensor.distanceCm >= 0 &&
+        sensor.distanceCm <= limitCm;
+      if (tooClose && motionAlertCount < maxMotionAlerts) {
+        newAlerts.push({
+          type: "security",
+          severity: "critical",
+          message: `⚠️ PROXIMITY BREACH: Object at ${sensor.distanceCm!.toFixed(1)} cm (limit ${limitCm.toFixed(0)} cm) at ${sensor.name}`,
+          sensorId: sensor.id,
+          timestamp: new Date(),
+          acknowledged: false,
+          escalated: false,
+        });
+        motionAlertCount++;
+      }
     });
 
     return newAlerts;
+  };
+
+  const publishAlerts = async (sensorSnapshot: SensorData[]) => {
+    const candidates = checkSensorsForAlerts(sensorSnapshot);
+    if (candidates.length === 0) return;
+
+    const recentAlertKeys = new Set(
+      alertsRef.current
+        .filter((a) => Date.now() - a.timestamp.getTime() < 60000)
+        .map((a) => `${a.sensorId}-${a.type}-${a.message.slice(0, 24)}`)
+    );
+
+    const uniqueNewAlerts = candidates.filter((alert) => {
+      const key = `${alert.sensorId}-${alert.type}-${alert.message.slice(0, 24)}`;
+      return !recentAlertKeys.has(key);
+    });
+
+    for (const alert of uniqueNewAlerts) {
+      try {
+        const alertRef = await addDoc(collection(db, "alerts"), {
+          ...alert,
+          timestamp: Timestamp.fromDate(alert.timestamp),
+        });
+        const fullAlert: Alert = { ...alert, id: alertRef.id };
+        dispatchAlert(fullAlert);
+
+        if (alert.type === "security" && alert.severity === "critical") {
+          const sensor = sensorSnapshot.find((s) => s.id === alert.sensorId);
+          if (sensor) triggerBuzzer(sensor.name);
+        }
+
+        if (alert.severity === "critical") {
+          toast.error(alert.message, {
+            duration: 5000,
+            action: {
+              label: "View Alert",
+              onClick: () => {
+                if (navigateToAlertsRef.current) navigateToAlertsRef.current();
+                else window.location.href = "/dashboard/alerts";
+              },
+            },
+          });
+        } else {
+          toast.warning(alert.message, { duration: 4000 });
+        }
+
+        await addDoc(collection(db, "logs"), {
+          timestamp: Timestamp.now(),
+          sensorLocation:
+            sensorSnapshot.find((s) => s.id === alert.sensorId)?.location || "Unknown",
+          temperature:
+            sensorSnapshot.find((s) => s.id === alert.sensorId)?.temperature || 0,
+          humidity:
+            sensorSnapshot.find((s) => s.id === alert.sensorId)?.humidity || 0,
+          motionDetected:
+            sensorSnapshot.find((s) => s.id === alert.sensorId)?.motionDetected || false,
+        });
+      } catch (err) {
+        console.error("[ALERT] Failed to publish alert:", err);
+      }
+    }
   };
 
   // ── 6. Alert escalation check — escalate unacknowledged alerts after 15 min ──
