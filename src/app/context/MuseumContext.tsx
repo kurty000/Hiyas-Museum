@@ -214,6 +214,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const liveHardwareIdsRef = useRef<Set<string>>(new Set());
   /** Latest ESP readings — always win over static Firestore copies */
   const liveReadingsRef = useRef<Record<string, Partial<SensorData>>>({});
+  /** Sensors deleted by admin — ignore ESP/RTDB recreate until removed from this set */
+  const deletedSensorIdsRef = useRef<Set<string>>(new Set());
 
   const navigateToAlertsRef = useRef<(() => void) | null>(null);
 
@@ -221,6 +223,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     const byId = new Map(firestoreSensors.map((s) => [s.id, s]));
 
     for (const [id, live] of Object.entries(liveReadingsRef.current)) {
+      if (deletedSensorIdsRef.current.has(id)) continue;
       const existing = byId.get(id);
       // Keep Firestore settings (thresholds). Only overlay live ESP readings.
       const tempThreshold = existing?.tempThreshold ?? 24;
@@ -356,12 +359,26 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       }
     });
 
+    // --- Deleted sensor blocklist (stops ESP from recreating deleted sensors) ---
+    const unsubDeleted = onSnapshot(collection(db, "deletedSensors"), (snap) => {
+      const blocked = new Set<string>();
+      snap.forEach((d) => blocked.add(d.id));
+      deletedSensorIdsRef.current = blocked;
+      // Drop any live overlays for blocked devices
+      for (const id of blocked) {
+        delete liveReadingsRef.current[id];
+        liveHardwareIdsRef.current.delete(id);
+      }
+      setSensors((prev) => prev.filter((s) => !blocked.has(s.id)));
+    });
+
     return () => {
       unsubSensors();
       unsubAlerts();
       unsubLogs();
       unsubContacts();
       unsubSettings();
+      unsubDeleted();
     };
   }, [seeded]);
 
@@ -380,6 +397,13 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       if (val) {
         for (const [deviceId, raw] of Object.entries(val)) {
           if (!raw || typeof raw !== "object") continue;
+
+          // Admin deleted this device — ignore ESP/RTDB (do not recreate in UI/Firestore)
+          if (deletedSensorIdsRef.current.has(deviceId)) {
+            delete liveReadingsRef.current[deviceId];
+            continue;
+          }
+
           ids.add(deviceId);
 
           const temperature = Number(raw.temperature ?? 20);
@@ -731,16 +755,24 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
   const deleteSensor = async (sensorId: string) => {
     try {
+      // Block ESP/RTDB from recreating this sensor
+      deletedSensorIdsRef.current.add(sensorId);
+      await setDoc(doc(db, "deletedSensors", sensorId), {
+        deletedAt: Timestamp.now(),
+        reason: "admin_delete",
+      });
+
       await deleteDoc(doc(db, "sensors", sensorId));
       delete liveReadingsRef.current[sensorId];
       liveHardwareIdsRef.current.delete(sensorId);
       setSensors((prev) => prev.filter((s) => s.id !== sensorId));
+
       try {
         await rtdbRemove(rtdbRef(rtdb, `liveSensors/${sensorId}`));
       } catch (rtdbErr) {
         console.warn("[DELETE] RTDB cleanup skipped:", rtdbErr);
       }
-      toast.success("Sensor deleted");
+      toast.success("Sensor deleted. ESP will not bring it back.");
     } catch (error) {
       console.error("Error deleting sensor:", error);
       toast.error("Failed to delete sensor");
