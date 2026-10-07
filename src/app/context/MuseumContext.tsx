@@ -1,10 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import {
-  collection, doc, onSnapshot, addDoc, updateDoc, setDoc, getDocs, writeBatch,
+  collection, doc, onSnapshot, addDoc, updateDoc, setDoc, deleteDoc, getDocs, writeBatch,
   Timestamp, query, orderBy, limit, where
 } from "firebase/firestore";
-import { onValue, ref as rtdbRef } from "firebase/database";
+import { onValue, ref as rtdbRef, remove as rtdbRemove } from "firebase/database";
 import { db, rtdb } from "../firebase";
 
 export interface SensorData {
@@ -81,6 +81,7 @@ interface MuseumContextType {
   updateSensorSettings: (sensorId: string, tempThreshold: number, humidityThreshold: number, motionThreshold: number, distanceThreshold: number) => void;
   acknowledgeAlert: (alertId: string, acknowledgedBy?: string) => void;
   archiveSensor: (sensorId: string) => void;
+  deleteSensor: (sensorId: string) => void;
   addSensor: (name: string, location: string) => void;
   setNavigateToAlerts: (callback: () => void) => void;
   // Contact management
@@ -728,6 +729,24 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  const deleteSensor = async (sensorId: string) => {
+    try {
+      await deleteDoc(doc(db, "sensors", sensorId));
+      delete liveReadingsRef.current[sensorId];
+      liveHardwareIdsRef.current.delete(sensorId);
+      setSensors((prev) => prev.filter((s) => s.id !== sensorId));
+      try {
+        await rtdbRemove(rtdbRef(rtdb, `liveSensors/${sensorId}`));
+      } catch (rtdbErr) {
+        console.warn("[DELETE] RTDB cleanup skipped:", rtdbErr);
+      }
+      toast.success("Sensor deleted");
+    } catch (error) {
+      console.error("Error deleting sensor:", error);
+      toast.error("Failed to delete sensor");
+    }
+  };
+
   const addSensor = async (name: string, location: string) => {
     try {
       await addDoc(collection(db, "sensors"), {
@@ -801,6 +820,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         updateSensorSettings,
         acknowledgeAlert,
         archiveSensor,
+        deleteSensor,
         addSensor,
         setNavigateToAlerts,
         addContact,
