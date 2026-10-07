@@ -56,7 +56,7 @@ npm run firebase:deploy-rules
 
 Also add `hiyas-museum.vercel.app` under Firebase Console → Authentication → Settings → Authorized domains.
 
-### Environment variables (Vercel `/api/sensors`)
+### Environment variables (optional serverless handler in `server/sensors.ts` (not deployed by default))
 
 - `FIREBASE_PROJECT_ID`
 - `FIREBASE_CLIENT_EMAIL`
