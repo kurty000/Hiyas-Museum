@@ -8,7 +8,7 @@ import { Label } from "../components/ui/label";
 import { Slider } from "../components/ui/slider";
 import { Separator } from "../components/ui/separator";
 import { Input } from "../components/ui/input";
-import { Thermometer, Droplets, Radio, Archive, Settings, Activity, Target, Plus, Trash2 } from "lucide-react";
+import { Thermometer, Droplets, Radio, Settings, Activity, Target, Plus, Trash2 } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,7 +31,7 @@ import {
 } from "../components/ui/dialog";
 
 export default function Sensors() {
-  const { sensors, archiveSensor, deleteSensor, updateSensorSettings, addSensor } = useMuseum();
+  const { sensors, deleteSensor, updateSensorSettings, addSensor } = useMuseum();
   const { isAdmin } = useAuth();
   const [editingSensor, setEditingSensor] = useState<string | null>(null);
   const [tempSettings, setTempSettings] = useState<{
@@ -274,36 +274,6 @@ export default function Sensors() {
                 </div>
                 {isAdmin && (
                   <div className="flex flex-wrap gap-2 mt-3">
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="border-orange-300 text-orange-700 hover:bg-orange-50"
-                        >
-                          <Archive className="w-4 h-4 mr-1" />
-                          Archive
-                        </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Archive Sensor</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Archive "{sensor.name}"? It will leave active monitoring; history is kept.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => archiveSensor(sensor.id)}
-                            className="bg-orange-600 hover:bg-orange-700"
-                          >
-                            Archive
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
-
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
                         <Button variant="destructive" size="sm">
