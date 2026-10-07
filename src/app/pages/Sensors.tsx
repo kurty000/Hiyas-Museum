@@ -363,13 +363,16 @@ export default function Sensors() {
                   </div>
                 </div>
 
-                {/* Motion / Proximity */}
+                {/* Motion / Proximity — units match Distance Threshold (meters) */}
                 {(() => {
-                  const limitCm = sensor.distanceThreshold * 100;
-                  const tooClose =
+                  const limitM = sensor.distanceThreshold;
+                  const distM =
                     sensor.distanceCm != null &&
                     sensor.distanceCm >= 0 &&
-                    sensor.distanceCm <= limitCm;
+                    sensor.distanceCm < 900
+                      ? sensor.distanceCm / 100
+                      : null;
+                  const tooClose = distM != null && distM <= limitM;
                   const breach = sensor.motionDetected || tooClose;
                   return (
                     <div
@@ -398,11 +401,11 @@ export default function Sensors() {
                           >
                             {breach ? "Breach!" : "Safe"}
                           </p>
-                          {sensor.distanceCm != null && (
-                            <p className="text-xs text-gray-500">
-                              {sensor.distanceCm.toFixed(1)} cm / limit {limitCm.toFixed(0)} cm
-                            </p>
-                          )}
+                          <p className="text-xs text-gray-500">
+                            {distM != null
+                              ? `${distM.toFixed(2)} m / limit ${limitM.toFixed(1)} m`
+                              : `No reading / limit ${limitM.toFixed(1)} m`}
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -448,7 +451,7 @@ export default function Sensors() {
                             />
                             <div className="flex justify-between text-xs text-gray-500">
                               <span>18°C</span>
-                              <span>28°C</span>
+                              <span>50°C</span>
                             </div>
                           </>
                         ) : (
