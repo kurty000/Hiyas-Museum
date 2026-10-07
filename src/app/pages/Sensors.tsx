@@ -555,9 +555,9 @@ export default function Sensors() {
                           <>
                             <Slider
                               min={0.5}
-                              max={3}
-                              step={0.1}
-                              value={[currentDistance]}
+                              max={100}
+                              step={0.5}
+                              value={[Math.min(currentDistance, 100)]}
                               onValueChange={(value) =>
                                 setTempSettings({
                                   ...tempSettings!,
@@ -568,8 +568,24 @@ export default function Sensors() {
                             />
                             <div className="flex justify-between text-xs text-gray-500">
                               <span>0.5m</span>
-                              <span>3.0m</span>
+                              <span>100m</span>
                             </div>
+                            <Input
+                              type="number"
+                              min={0.5}
+                              max={100}
+                              step={0.5}
+                              value={currentDistance}
+                              onChange={(e) => {
+                                const n = Number(e.target.value);
+                                if (Number.isNaN(n)) return;
+                                setTempSettings({
+                                  ...tempSettings!,
+                                  distanceThreshold: Math.min(100, Math.max(0.5, n)),
+                                });
+                              }}
+                              className="w-full h-8 text-sm"
+                            />
                           </>
                         ) : (
                           <div className="bg-blue-50 border border-blue-200 rounded px-3 py-2">
