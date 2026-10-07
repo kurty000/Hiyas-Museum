@@ -363,17 +363,13 @@ export default function Sensors() {
                   </div>
                 </div>
 
-                {/* Motion / Proximity — units match Distance Threshold (meters) */}
+                {/* Motion / Distance — meters only */}
                 {(() => {
                   const limitM = sensor.distanceThreshold;
-                  const distM =
-                    sensor.distanceCm != null &&
-                    sensor.distanceCm >= 0 &&
-                    sensor.distanceCm < 900
-                      ? sensor.distanceCm / 100
-                      : null;
-                  const tooClose = distM != null && distM <= limitM;
-                  const breach = sensor.motionDetected || tooClose;
+                  const distM = sensor.distanceM;
+                  // Breach only when reading reaches or exceeds the set meter limit
+                  const reachedLimit = distM != null && distM >= limitM;
+                  const breach = sensor.motionDetected || reachedLimit;
                   return (
                     <div
                       className={`flex items-center justify-between p-3 rounded-lg ${
@@ -393,7 +389,7 @@ export default function Sensors() {
                           />
                         </div>
                         <div>
-                          <p className="text-xs text-gray-600">Proximity Status</p>
+                          <p className="text-xs text-gray-600">Distance Status</p>
                           <p
                             className={`text-lg font-bold ${
                               breach ? "text-red-600" : "text-gray-900"
@@ -543,7 +539,7 @@ export default function Sensors() {
                         )}
                       </div>
 
-                      {/* Distance Threshold */}
+                      {/* Distance Threshold = breach when reading reaches/exceeds this (meters) */}
                       <div className="space-y-2">
                         <div className="flex items-center gap-2">
                           <Target className="w-4 h-4 text-blue-600" />
@@ -554,6 +550,9 @@ export default function Sensors() {
                             {currentDistance.toFixed(1)}m
                           </span>
                         </div>
+                        <p className="text-xs text-gray-500">
+                          Breach when reading is <span className="font-medium">at or above</span> this limit (meters). Below = Safe.
+                        </p>
                         {isEditing ? (
                           <>
                             <Slider
