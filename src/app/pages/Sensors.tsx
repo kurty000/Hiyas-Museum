@@ -8,7 +8,7 @@ import { Label } from "../components/ui/label";
 import { Slider } from "../components/ui/slider";
 import { Separator } from "../components/ui/separator";
 import { Input } from "../components/ui/input";
-import { Thermometer, Droplets, Radio, Archive, Settings, Activity, Target, Plus } from "lucide-react";
+import { Thermometer, Droplets, Radio, Archive, Settings, Activity, Target, Plus, Trash2 } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,7 +31,7 @@ import {
 } from "../components/ui/dialog";
 
 export default function Sensors() {
-  const { sensors, archiveSensor, updateSensorSettings, addSensor } = useMuseum();
+  const { sensors, archiveSensor, deleteSensor, updateSensorSettings, addSensor } = useMuseum();
   const { isAdmin } = useAuth();
   const [editingSensor, setEditingSensor] = useState<string | null>(null);
   const [tempSettings, setTempSettings] = useState<{
@@ -248,30 +248,66 @@ export default function Sensors() {
                   <div className="flex items-center gap-2">
                     {getStatusBadge(sensor.status)}
                     {isAdmin && (
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <button className="h-8 w-8 inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-orange-50 hover:text-orange-600 text-gray-400">
-                            <Archive className="w-4 h-4" />
-                          </button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>Archive Sensor</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              Are you sure you want to archive the sensor "{sensor.name}"? Historical readings and alert records will be preserved. This sensor will no longer appear in active monitoring.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => archiveSensor(sensor.id)}
-                              className="bg-orange-600 hover:bg-orange-700"
+                      <>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <button
+                              title="Archive sensor"
+                              className="h-8 w-8 inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-orange-50 hover:text-orange-600 text-gray-400"
                             >
-                              Archive
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
+                              <Archive className="w-4 h-4" />
+                            </button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Archive Sensor</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Are you sure you want to archive the sensor "{sensor.name}"? Historical readings and alert records will be preserved. This sensor will no longer appear in active monitoring.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() => archiveSensor(sensor.id)}
+                                className="bg-orange-600 hover:bg-orange-700"
+                              >
+                                Archive
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              className="h-8 gap-1"
+                              title="Delete sensor"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                              Delete
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Delete Sensor</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Permanently delete "{sensor.name}"? This removes it from Firestore and live sensors. Historical alerts/logs are kept. The ESP may recreate the live entry if it is still sending data.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() => deleteSensor(sensor.id)}
+                                className="bg-red-600 hover:bg-red-700"
+                              >
+                                Delete
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </>
                     )}
                   </div>
                 </div>
