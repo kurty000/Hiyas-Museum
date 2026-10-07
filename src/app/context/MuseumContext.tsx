@@ -1095,7 +1095,13 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   // ── Actions (write to Firestore) ──────────────────────────────
   const updateSettings = async (newSettings: SystemSettings) => {
     try {
-      await setDoc(doc(db, "settings", "global"), newSettings);
+      const payload: SystemSettings = {
+        ...newSettings,
+        offlineTimeoutSeconds: normalizeOfflineTimeoutSeconds(
+          newSettings.offlineTimeoutSeconds
+        ),
+      };
+      await setDoc(doc(db, "settings", "global"), payload);
       toast.success("Settings updated successfully");
     } catch (error) {
       console.error("Error updating settings:", error);
