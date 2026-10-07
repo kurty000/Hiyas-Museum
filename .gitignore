@@ -1,0 +1,14 @@
+*-debug.log
+dist
+dist-ssr
+dist-tsc
+.DS_Store
+.env
+.env.*
+.env.*.local
+.env.local
+.firebase/
+.firebaserc.local
+*.local
+node_modules
+node_modules/

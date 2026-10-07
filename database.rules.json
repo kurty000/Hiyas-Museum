@@ -1,0 +1,14 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "liveSensors": {
+      ".read": "auth != null",
+      "$deviceId": {
+        ".read": "auth != null",
+        ".write": "auth != null || (newData.exists() && newData.hasChildren(['temperature', 'humidity']) && (!newData.hasChild('deviceId') || newData.child('deviceId').val() === $deviceId))",
+        ".validate": "newData.child('temperature').isNumber() && newData.child('humidity').isNumber() && (!newData.hasChild('distanceCm') || newData.child('distanceCm').isNumber()) && (!newData.hasChild('motionDetected') || newData.child('motionDetected').isBoolean())"
+      }
+    }
+  }
+}
