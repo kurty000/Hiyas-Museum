@@ -438,7 +438,7 @@ export default function Sensors() {
                           <>
                             <Slider
                               min={18}
-                              max={28}
+                              max={50}
                               step={1}
                               value={[currentTemp]}
                               onValueChange={(value) =>
