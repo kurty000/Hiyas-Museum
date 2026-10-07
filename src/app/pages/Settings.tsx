@@ -117,8 +117,17 @@ export default function Settings() {
     const account = { ...newAccount };
     setCreatingAccount(true);
     try {
-      await addUser(account.username, account.email, account.password, account.role);
-      toast.success(`Account created for ${account.username}`);
+      const result = await addUser(
+        account.username,
+        account.email,
+        account.password,
+        account.role
+      );
+      toast.success(
+        result.linkedExistingAuth
+          ? `${account.username} linked and added to Account Management as ${account.role}.`
+          : `${account.username} created as ${account.role} and added to the table.`
+      );
       setNewAccount({ username: "", email: "", password: "", role: "curator" });
       setConfirmAddAccountOpen(false);
     } catch (error: any) {
@@ -466,7 +475,9 @@ export default function Settings() {
               <DialogContent className="max-w-md">
                 <DialogHeader>
                   <DialogTitle>Create Staff Account</DialogTitle>
-                  <DialogDescription>Add a new staff member account</DialogDescription>
+                  <DialogDescription>
+                    Any admin can create admin or curator accounts. New users appear in the table below right away.
+                  </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 py-4">
                   <div className="space-y-2">
@@ -583,7 +594,9 @@ export default function Settings() {
                       <Badge
                         variant={account.role === "admin" ? "default" : "secondary"}
                         className={
-                          account.role === "admin" ? "bg-purple-600" : ""
+                          account.role === "admin"
+                            ? "bg-purple-600 hover:bg-purple-600 text-white"
+                            : "bg-slate-200 text-slate-800 hover:bg-slate-200"
                         }
                       >
                         {account.role === "admin" ? "Admin" : "Curator"}
