@@ -14,6 +14,8 @@ export interface SensorData {
   temperature: number;
   humidity: number;
   motionDetected: boolean;
+  /** Latest HC-SR04 reading from ESP (cm). Optional for manual sensors. */
+  distanceCm?: number;
   status: "safe" | "warning" | "critical" | "offline";
   lastUpdated: Date;
   tempThreshold: number; // Temperature threshold in °C
@@ -21,6 +23,48 @@ export interface SensorData {
   motionThreshold: number; // 1-10 scale
   distanceThreshold: number; // in meters (0.5-3)
   archived: boolean; // Soft-delete flag
+}
+
+/** Derive dashboard status from live readings + website threshold settings */
+function computeSensorStatus(input: {
+  temperature: number;
+  humidity: number;
+  motionDetected: boolean;
+  distanceCm?: number;
+  tempThreshold: number;
+  humidityThreshold: number;
+  distanceThreshold: number; // meters
+}): SensorData["status"] {
+  const {
+    temperature,
+    humidity,
+    motionDetected,
+    distanceCm,
+    tempThreshold,
+    humidityThreshold,
+    distanceThreshold,
+  } = input;
+
+  const distanceLimitCm = distanceThreshold * 100;
+  const tooClose =
+    distanceCm != null &&
+    distanceCm >= 0 &&
+    distanceCm <= distanceLimitCm;
+
+  // Security / proximity → critical
+  if (motionDetected || tooClose) return "critical";
+
+  // Severe environmental breach → critical
+  if (temperature > tempThreshold + 2 || humidity > humidityThreshold + 10) {
+    return "critical";
+  }
+
+  // Above configured limits → warning
+  if (temperature > tempThreshold || humidity > humidityThreshold) {
+    return "warning";
+  }
+
+  return "safe";
 }
 
 export interface Alert {
@@ -217,8 +261,14 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const liveReadingsRef = useRef<Record<string, Partial<SensorData>>>({});
   /** Sensors deleted by admin — ignore ESP/RTDB recreate until removed from this set */
   const deletedSensorIdsRef = useRef<Set<string>>(new Set());
+  /** Latest sensors snapshot for threshold lookup during RTDB sync */
+  const sensorsRef = useRef<SensorData[]>([]);
 
   const navigateToAlertsRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    sensorsRef.current = sensors;
+  }, [sensors]);
 
   const mergeLiveOntoSensors = (firestoreSensors: SensorData[]): SensorData[] => {
     const byId = new Map(firestoreSensors.map((s) => [s.id, s]));
@@ -234,10 +284,17 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       const temperature = live.temperature ?? existing?.temperature ?? 20;
       const humidity = live.humidity ?? existing?.humidity ?? 45;
       const motionDetected = live.motionDetected ?? existing?.motionDetected ?? false;
+      const distanceCm = live.distanceCm ?? existing?.distanceCm;
 
-      let status: SensorData["status"] = "safe";
-      if (motionDetected) status = "critical";
-      else if (temperature > tempThreshold || humidity > humidityThreshold) status = "warning";
+      const status = computeSensorStatus({
+        temperature,
+        humidity,
+        motionDetected,
+        distanceCm,
+        tempThreshold,
+        humidityThreshold,
+        distanceThreshold,
+      });
 
       byId.set(id, {
         id,
@@ -246,6 +303,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         temperature,
         humidity,
         motionDetected,
+        distanceCm,
         status,
         lastUpdated: live.lastUpdated || existing?.lastUpdated || new Date(),
         tempThreshold,
@@ -275,13 +333,14 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       const data: SensorData[] = [];
       snap.forEach((d) => {
         const raw = d.data();
-        data.push({
+          data.push({
           id: d.id,
           name: raw.name || '',
           location: raw.location || '',
           temperature: raw.temperature ?? 20,
           humidity: raw.humidity ?? 45,
           motionDetected: raw.motionDetected ?? false,
+          distanceCm: raw.distanceCm != null ? Number(raw.distanceCm) : undefined,
           status: raw.status || 'safe',
           lastUpdated: toDate(raw.lastUpdated) || new Date(),
           tempThreshold: raw.tempThreshold ?? 24,
@@ -410,6 +469,10 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           const temperature = Number(raw.temperature ?? 20);
           const humidity = Number(raw.humidity ?? 45);
           const motionDetected = Boolean(raw.motionDetected);
+          const distanceCm =
+            raw.distanceCm != null && !Number.isNaN(Number(raw.distanceCm))
+              ? Number(raw.distanceCm)
+              : undefined;
 
           // Live overlay: readings only — never overwrite user threshold settings
           const livePartial: Partial<SensorData> = {
@@ -418,10 +481,22 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
             temperature,
             humidity,
             motionDetected,
+            distanceCm,
             lastUpdated: new Date(),
           };
 
           liveReadingsRef.current[deviceId] = livePartial;
+
+          const known = sensorsRef.current.find((s) => s.id === deviceId);
+          const status = computeSensorStatus({
+            temperature,
+            humidity,
+            motionDetected,
+            distanceCm,
+            tempThreshold: known?.tempThreshold ?? 24,
+            humidityThreshold: known?.humidityThreshold ?? 60,
+            distanceThreshold: known?.distanceThreshold ?? 1.5,
+          });
 
           // Mirror live readings into Firestore only (do not touch thresholds)
           try {
@@ -431,15 +506,11 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
                 temperature,
                 humidity,
                 motionDetected,
-                status: motionDetected
-                  ? "critical"
-                  : temperature > 24 || humidity > 60
-                    ? "warning"
-                    : "safe",
+                distanceCm: distanceCm ?? null,
+                status,
                 lastUpdated: Timestamp.now(),
                 hardware: true,
                 source: "esp32",
-                distanceCm: raw.distanceCm != null ? Number(raw.distanceCm) : null,
                 archived: false,
                 name: raw.name || deviceId,
                 location: raw.location || "Unknown",
@@ -777,7 +848,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       } catch (rtdbErr) {
         console.warn("[DELETE] RTDB cleanup skipped:", rtdbErr);
       }
-      toast.success("Sensor deleted.");
+      toast.success("Sensor deleted. ESP will not bring it back.");
     } catch (error) {
       console.error("Error deleting sensor:", error);
       toast.error("Failed to delete sensor");
