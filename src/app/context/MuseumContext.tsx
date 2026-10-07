@@ -14,23 +14,32 @@ export interface SensorData {
   temperature: number;
   humidity: number;
   motionDetected: boolean;
-  /** Latest HC-SR04 reading from ESP (cm). Optional for manual sensors. */
-  distanceCm?: number;
+  /** Latest distance reading in meters (converted from ESP once at ingest). */
+  distanceM?: number;
   status: "safe" | "warning" | "critical" | "offline";
   lastUpdated: Date;
   tempThreshold: number; // Temperature threshold in °C
   humidityThreshold: number; // Humidity threshold in %
   motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-100)
+  distanceThreshold: number; // in meters (0.5-100) — breach when object is at/closer than this
   archived: boolean; // Soft-delete flag
 }
 
-/** Derive dashboard status from live readings + website threshold settings */
+/** Convert ESP distanceCm → meters. Returns null for timeout/invalid (e.g. 999). */
+function toDistanceMeters(rawCm: unknown): number | undefined {
+  if (rawCm == null || Number.isNaN(Number(rawCm))) return undefined;
+  const cm = Number(rawCm);
+  // ESP sketch uses 999 as no-reading sentinel
+  if (cm < 0 || cm >= 900) return undefined;
+  return cm / 100;
+}
+
+/** Derive dashboard status from live readings + website threshold settings (meters only). */
 function computeSensorStatus(input: {
   temperature: number;
   humidity: number;
   motionDetected: boolean;
-  distanceCm?: number;
+  distanceM?: number;
   tempThreshold: number;
   humidityThreshold: number;
   distanceThreshold: number; // meters
@@ -39,29 +48,22 @@ function computeSensorStatus(input: {
     temperature,
     humidity,
     motionDetected,
-    distanceCm,
+    distanceM,
     tempThreshold,
     humidityThreshold,
     distanceThreshold,
   } = input;
 
-  // ESP uses 999 as timeout/error sentinel — ignore invalid readings
-  const distanceLimitCm = distanceThreshold * 100;
-  const validDistance =
-    distanceCm != null &&
-    distanceCm >= 0 &&
-    distanceCm < 900;
-  const tooClose = validDistance && distanceCm! <= distanceLimitCm;
+  // Breach only when object is at or closer than the set meter limit
+  const atOrCloserThanLimit =
+    distanceM != null && distanceM <= distanceThreshold;
 
-  // Security / proximity → critical
-  if (motionDetected || tooClose) return "critical";
+  if (motionDetected || atOrCloserThanLimit) return "critical";
 
-  // Severe environmental breach → critical
   if (temperature > tempThreshold + 2 || humidity > humidityThreshold + 10) {
     return "critical";
   }
 
-  // Above configured limits → warning
   if (temperature > tempThreshold || humidity > humidityThreshold) {
     return "warning";
   }
@@ -294,13 +296,13 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       const temperature = live.temperature ?? existing?.temperature ?? 20;
       const humidity = live.humidity ?? existing?.humidity ?? 45;
       const motionDetected = live.motionDetected ?? existing?.motionDetected ?? false;
-      const distanceCm = live.distanceCm ?? existing?.distanceCm;
+      const distanceM = live.distanceM ?? existing?.distanceM;
 
       const status = computeSensorStatus({
         temperature,
         humidity,
         motionDetected,
-        distanceCm,
+        distanceM,
         tempThreshold,
         humidityThreshold,
         distanceThreshold,
@@ -313,7 +315,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         temperature,
         humidity,
         motionDetected,
-        distanceCm,
+        distanceM,
         status,
         lastUpdated: live.lastUpdated || existing?.lastUpdated || new Date(),
         tempThreshold,
@@ -350,7 +352,10 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           temperature: raw.temperature ?? 20,
           humidity: raw.humidity ?? 45,
           motionDetected: raw.motionDetected ?? false,
-          distanceCm: raw.distanceCm != null ? Number(raw.distanceCm) : undefined,
+          distanceM:
+            raw.distanceM != null
+              ? Number(raw.distanceM)
+              : toDistanceMeters(raw.distanceCm),
           status: raw.status || 'safe',
           lastUpdated: toDate(raw.lastUpdated) || new Date(),
           tempThreshold: raw.tempThreshold ?? 24,
@@ -479,10 +484,11 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           const temperature = Number(raw.temperature ?? 20);
           const humidity = Number(raw.humidity ?? 45);
           const motionDetected = Boolean(raw.motionDetected);
-          const distanceCm =
-            raw.distanceCm != null && !Number.isNaN(Number(raw.distanceCm))
-              ? Number(raw.distanceCm)
-              : undefined;
+          // Convert ESP cm → meters once; all app logic uses meters only
+          const distanceM =
+            raw.distanceM != null
+              ? Number(raw.distanceM)
+              : toDistanceMeters(raw.distanceCm);
 
           // Live overlay: readings only — never overwrite user threshold settings
           const livePartial: Partial<SensorData> = {
@@ -491,7 +497,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
             temperature,
             humidity,
             motionDetected,
-            distanceCm,
+            distanceM,
             lastUpdated: new Date(),
           };
 
@@ -502,7 +508,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
             temperature,
             humidity,
             motionDetected,
-            distanceCm,
+            distanceM,
             tempThreshold: known?.tempThreshold ?? 24,
             humidityThreshold: known?.humidityThreshold ?? 60,
             distanceThreshold: known?.distanceThreshold ?? 1.5,
@@ -516,7 +522,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
                 temperature,
                 humidity,
                 motionDetected,
-                distanceCm: distanceCm ?? null,
+                distanceM: distanceM ?? null,
                 status,
                 lastUpdated: Timestamp.now(),
                 hardware: true,
@@ -630,18 +636,18 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         motionAlertCount++;
       }
 
-      // Distance / proximity (ESP cm vs website meters setting)
+      // Distance: breach when at or closer than set meter limit
       const limitM = sensor.distanceThreshold;
-      const distM =
-        sensor.distanceCm != null && sensor.distanceCm >= 0 && sensor.distanceCm < 900
-          ? sensor.distanceCm / 100
-          : null;
-      const tooClose = distM != null && distM <= limitM;
-      if (tooClose && motionAlertCount < maxMotionAlerts) {
+      const distM = sensor.distanceM;
+      if (
+        distM != null &&
+        distM <= limitM &&
+        motionAlertCount < maxMotionAlerts
+      ) {
         newAlerts.push({
           type: "security",
           severity: "critical",
-          message: `⚠️ PROXIMITY BREACH: Object at ${distM!.toFixed(2)} m (limit ${limitM.toFixed(1)} m) at ${sensor.name}`,
+          message: `⚠️ PROXIMITY BREACH: Object at ${distM.toFixed(2)} m (limit ${limitM.toFixed(1)} m) at ${sensor.name}`,
           sensorId: sensor.id,
           timestamp: new Date(),
           acknowledged: false,
