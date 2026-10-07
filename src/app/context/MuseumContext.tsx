@@ -21,7 +21,7 @@ export interface SensorData {
   tempThreshold: number; // Temperature threshold in °C
   humidityThreshold: number; // Humidity threshold in %
   motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-3)
+  distanceThreshold: number; // in meters (0.5-100)
   archived: boolean; // Soft-delete flag
 }
 
@@ -102,7 +102,7 @@ export interface Contact {
 
 export interface SystemSettings {
   motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-3)
+  distanceThreshold: number; // in meters (0.5-100)
   motionSensitivity: "low" | "medium" | "high";
   emailAlerts: boolean;
   telegramAlerts: boolean;
@@ -825,14 +825,15 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
   const updateSensorSettings = async (sensorId: string, tempThreshold: number, humidityThreshold: number, motionThreshold: number, distanceThreshold: number) => {
     try {
+      const clampedDistance = Math.min(100, Math.max(0.5, distanceThreshold));
       await updateDoc(doc(db, "sensors", sensorId), {
-        tempThreshold, humidityThreshold, motionThreshold, distanceThreshold
+        tempThreshold, humidityThreshold, motionThreshold, distanceThreshold: clampedDistance
       });
       // Keep UI thresholds even while live ESP readings keep streaming
       setSensors((prev) =>
         prev.map((s) =>
           s.id === sensorId
-            ? { ...s, tempThreshold, humidityThreshold, motionThreshold, distanceThreshold }
+            ? { ...s, tempThreshold, humidityThreshold, motionThreshold, distanceThreshold: clampedDistance }
             : s
         )
       );
