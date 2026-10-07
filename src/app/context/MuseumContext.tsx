@@ -772,7 +772,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       } catch (rtdbErr) {
         console.warn("[DELETE] RTDB cleanup skipped:", rtdbErr);
       }
-      toast.success("Sensor deleted. ESP will not bring it back.");
+      toast.success("Sensor deleted.");
     } catch (error) {
       console.error("Error deleting sensor:", error);
       toast.error("Failed to delete sensor");
