@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import {
-  collection, doc, onSnapshot, addDoc, updateDoc, setDoc, getDocs, writeBatch,
-  Timestamp, query, orderBy, limit, where
+  collection, doc, onSnapshot, addDoc, updateDoc, setDoc, getDocs,
+  Timestamp, query, orderBy, limit
 } from "firebase/firestore";
 import { db } from "../firebase";
 
@@ -15,11 +15,11 @@ export interface SensorData {
   motionDetected: boolean;
   status: "safe" | "warning" | "critical" | "offline";
   lastUpdated: Date;
-  tempThreshold: number; // Temperature threshold in °C
-  humidityThreshold: number; // Humidity threshold in %
-  motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-3)
-  archived: boolean; // Soft-delete flag
+  tempThreshold: number;
+  humidityThreshold: number;
+  motionThreshold: number;
+  distanceThreshold: number;
+  archived: boolean;
 }
 
 export interface Alert {
@@ -56,13 +56,13 @@ export interface Contact {
 }
 
 export interface SystemSettings {
-  motionThreshold: number; // 1-10 scale
-  distanceThreshold: number; // in meters (0.5-3)
+  motionThreshold: number;
+  distanceThreshold: number;
   motionSensitivity: "low" | "medium" | "high";
   emailAlerts: boolean;
   telegramAlerts: boolean;
-  reportingIntervalSeconds: number; // Default 15
-  dataRetentionMonths: number; // Default 12
+  reportingIntervalSeconds: number;
+  dataRetentionMonths: number;
   wifiSSID?: string;
   wifiPassword?: string;
   mqttBroker?: string;
@@ -77,20 +77,24 @@ interface MuseumContextType {
   settings: SystemSettings;
   contacts: Contact[];
   updateSettings: (newSettings: SystemSettings) => void;
-  updateSensorSettings: (sensorId: string, tempThreshold: number, humidityThreshold: number, motionThreshold: number, distanceThreshold: number) => void;
+  updateSensorSettings: (
+    sensorId: string,
+    tempThreshold: number,
+    humidityThreshold: number,
+    motionThreshold: number,
+    distanceThreshold: number
+  ) => void;
   acknowledgeAlert: (alertId: string, acknowledgedBy?: string) => void;
   archiveSensor: (sensorId: string) => void;
   addSensor: (name: string, location: string) => void;
   setNavigateToAlerts: (callback: () => void) => void;
-  // Contact management
-  addContact: (contact: Omit<Contact, 'id' | 'archived'>) => void;
+  addContact: (contact: Omit<Contact, "id" | "archived">) => void;
   updateContact: (contact: Contact) => void;
   archiveContact: (id: string) => void;
 }
 
 const MuseumContext = createContext<MuseumContextType | undefined>(undefined);
 
-// Default settings used for seeding and fallback
 const DEFAULT_SETTINGS: SystemSettings = {
   motionThreshold: 5,
   distanceThreshold: 1.5,
@@ -105,21 +109,18 @@ const DEFAULT_SETTINGS: SystemSettings = {
   mqttTopic: "museum/sensors/+",
 };
 
-// ── Firestore Helpers ──────────────────────────────────────────────
-// Convert Firestore timestamps to JS Dates when reading a document
 const toDate = (val: any): Date | undefined => {
   if (!val) return undefined;
   if (val instanceof Timestamp) return val.toDate();
   if (val instanceof Date) return val;
-  if (typeof val === 'string') return new Date(val);
+  if (typeof val === "string") return new Date(val);
   return undefined;
 };
 
-// ── Seed helpers (migrate mock data into Firestore on first run) ──
-const generateInitialSensors = (): Omit<SensorData, 'id'>[] => {
+const generateInitialSensors = (): Omit<SensorData, "id">[] => {
   const galleries = ["Gallery A", "Gallery B", "Gallery C", "Main Hall"];
   const artifacts = ["Artifact 1", "Artifact 2", "Artifact 3"];
-  const sensors: Omit<SensorData, 'id'>[] = [];
+  const sensors: Omit<SensorData, "id">[] = [];
 
   galleries.forEach((gallery, gIndex) => {
     artifacts.slice(0, gIndex === 0 ? 3 : 2).forEach((artifact) => {
@@ -146,7 +147,7 @@ const generateInitialSensors = (): Omit<SensorData, 'id'>[] => {
   return sensors;
 };
 
-const INITIAL_CONTACTS: Omit<Contact, 'id'>[] = [
+const INITIAL_CONTACTS: Omit<Contact, "id">[] = [
   {
     name: "John Smith",
     role: "Security Chief",
@@ -165,150 +166,213 @@ const INITIAL_CONTACTS: Omit<Contact, 'id'>[] = [
   },
 ];
 
-// Seed Firestore with initial data if collections are empty
 async function seedFirestoreIfEmpty() {
-  // Seed sensors
   const sensorsSnap = await getDocs(collection(db, "sensors"));
+
   if (sensorsSnap.empty) {
-    const batch = writeBatch(db);
     const initialSensors = generateInitialSensors();
-    initialSensors.forEach((sensor) => {
+
+    for (const sensor of initialSensors) {
       const ref = doc(collection(db, "sensors"));
-      batch.set(ref, { ...sensor, lastUpdated: Timestamp.now() });
-    });
-    await batch.commit();
+
+      await setDoc(ref, {
+        ...sensor,
+        lastUpdated: Timestamp.now(),
+      });
+    }
+
     console.log("[SEED] Seeded sensors collection");
   }
 
-  // Seed contacts
   const contactsSnap = await getDocs(collection(db, "contacts"));
+
   if (contactsSnap.empty) {
-    const batch = writeBatch(db);
-    INITIAL_CONTACTS.forEach((contact) => {
+    for (const contact of INITIAL_CONTACTS) {
       const ref = doc(collection(db, "contacts"));
-      batch.set(ref, contact);
-    });
-    await batch.commit();
+
+      await setDoc(ref, contact);
+    }
+
     console.log("[SEED] Seeded contacts collection");
   }
 
-  // Seed settings
   const settingsSnap = await getDocs(collection(db, "settings"));
+
   if (settingsSnap.empty) {
-    await setDoc(doc(db, "settings", "global"), DEFAULT_SETTINGS);
+    await setDoc(
+      doc(db, "settings", "global"),
+      DEFAULT_SETTINGS
+    );
+
     console.log("[SEED] Seeded settings document");
   }
 }
 
-// ── Provider ──────────────────────────────────────────────────────
-export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
+export const MuseumProvider = ({
+  children,
+}: {
+  children: React.ReactNode;
+}) => {
   const [sensors, setSensors] = useState<SensorData[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
-  const [settings, setSettings] = useState<SystemSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] =
+    useState<SystemSettings>(DEFAULT_SETTINGS);
   const [seeded, setSeeded] = useState(false);
 
-  const navigateToAlertsRef = useRef<(() => void) | null>(null);
+  const navigateToAlertsRef =
+    useRef<(() => void) | null>(null);
 
   // ── 1. Seed Firestore on first mount ──────────────────────────
   useEffect(() => {
-    seedFirestoreIfEmpty().then(() => setSeeded(true)).catch(console.error);
+    seedFirestoreIfEmpty()
+      .then(() => setSeeded(true))
+      .catch((error) => {
+        console.error("[SEED] Error:", error);
+        setSeeded(true);
+      });
   }, []);
 
-  // ── 2. Real-time listeners (only start after seed completes) ──
+  // ── 2. Real-time Firestore listeners ──────────────────────────
   useEffect(() => {
     if (!seeded) return;
 
     // --- Sensors ---
-    const unsubSensors = onSnapshot(collection(db, "sensors"), (snap) => {
-      const data: SensorData[] = [];
-      snap.forEach((d) => {
-        const raw = d.data();
-        data.push({
-          id: d.id,
-          name: raw.name || '',
-          location: raw.location || '',
-          temperature: raw.temperature ?? 20,
-          humidity: raw.humidity ?? 45,
-          motionDetected: raw.motionDetected ?? false,
-          status: raw.status || 'safe',
-          lastUpdated: toDate(raw.lastUpdated) || new Date(),
-          tempThreshold: raw.tempThreshold ?? 24,
-          humidityThreshold: raw.humidityThreshold ?? 60,
-          motionThreshold: raw.motionThreshold ?? 5,
-          distanceThreshold: raw.distanceThreshold ?? 1.5,
-          archived: raw.archived ?? false,
+    const unsubSensors = onSnapshot(
+      collection(db, "sensors"),
+      (snap) => {
+        const data: SensorData[] = [];
+
+        snap.forEach((d) => {
+          const raw = d.data();
+
+          data.push({
+            id: d.id,
+            name: raw.name || "",
+            location: raw.location || "",
+            temperature: raw.temperature ?? 20,
+            humidity: raw.humidity ?? 45,
+            motionDetected: raw.motionDetected ?? false,
+            status: raw.status || "safe",
+            lastUpdated:
+              toDate(raw.lastUpdated) || new Date(),
+            tempThreshold: raw.tempThreshold ?? 24,
+            humidityThreshold: raw.humidityThreshold ?? 60,
+            motionThreshold: raw.motionThreshold ?? 5,
+            distanceThreshold: raw.distanceThreshold ?? 1.5,
+            archived: raw.archived ?? false,
+          });
         });
-      });
-      setSensors(data);
-    });
+
+        setSensors(data);
+      }
+    );
 
     // --- Alerts ---
-    const alertsQuery = query(collection(db, "alerts"), orderBy("timestamp", "desc"), limit(500));
-    const unsubAlerts = onSnapshot(alertsQuery, (snap) => {
-      const data: Alert[] = [];
-      snap.forEach((d) => {
-        const raw = d.data();
-        data.push({
-          id: d.id,
-          type: raw.type,
-          severity: raw.severity,
-          message: raw.message,
-          sensorId: raw.sensorId,
-          timestamp: toDate(raw.timestamp) || new Date(),
-          acknowledged: raw.acknowledged ?? false,
-          acknowledgedBy: raw.acknowledgedBy,
-          acknowledgedAt: toDate(raw.acknowledgedAt),
-          escalated: raw.escalated ?? false,
-          escalatedAt: toDate(raw.escalatedAt),
+    const alertsQuery = query(
+      collection(db, "alerts"),
+      orderBy("timestamp", "desc"),
+      limit(500)
+    );
+
+    const unsubAlerts = onSnapshot(
+      alertsQuery,
+      (snap) => {
+        const data: Alert[] = [];
+
+        snap.forEach((d) => {
+          const raw = d.data();
+
+          data.push({
+            id: d.id,
+            type: raw.type,
+            severity: raw.severity,
+            message: raw.message,
+            sensorId: raw.sensorId,
+            timestamp:
+              toDate(raw.timestamp) || new Date(),
+            acknowledged: raw.acknowledged ?? false,
+            acknowledgedBy: raw.acknowledgedBy,
+            acknowledgedAt:
+              toDate(raw.acknowledgedAt),
+            escalated: raw.escalated ?? false,
+            escalatedAt:
+              toDate(raw.escalatedAt),
+          });
         });
-      });
-      setAlerts(data);
-    });
+
+        setAlerts(data);
+      }
+    );
 
     // --- Logs ---
-    const logsQuery = query(collection(db, "logs"), orderBy("timestamp", "desc"), limit(1000));
-    const unsubLogs = onSnapshot(logsQuery, (snap) => {
-      const data: LogEntry[] = [];
-      snap.forEach((d) => {
-        const raw = d.data();
-        data.push({
-          id: d.id,
-          timestamp: toDate(raw.timestamp) || new Date(),
-          sensorLocation: raw.sensorLocation || '',
-          temperature: raw.temperature ?? 0,
-          humidity: raw.humidity ?? 0,
-          motionDetected: raw.motionDetected ?? false,
+    const logsQuery = query(
+      collection(db, "logs"),
+      orderBy("timestamp", "desc"),
+      limit(1000)
+    );
+
+    const unsubLogs = onSnapshot(
+      logsQuery,
+      (snap) => {
+        const data: LogEntry[] = [];
+
+        snap.forEach((d) => {
+          const raw = d.data();
+
+          data.push({
+            id: d.id,
+            timestamp:
+              toDate(raw.timestamp) || new Date(),
+            sensorLocation:
+              raw.sensorLocation || "",
+            temperature: raw.temperature ?? 0,
+            humidity: raw.humidity ?? 0,
+            motionDetected:
+              raw.motionDetected ?? false,
+          });
         });
-      });
-      setLogs(data);
-    });
+
+        setLogs(data);
+      }
+    );
 
     // --- Contacts ---
-    const unsubContacts = onSnapshot(collection(db, "contacts"), (snap) => {
-      const data: Contact[] = [];
-      snap.forEach((d) => {
-        const raw = d.data();
-        data.push({
-          id: d.id,
-          name: raw.name || '',
-          role: raw.role || '',
-          email: raw.email || '',
-          phone: raw.phone || '',
-          alertTypes: raw.alertTypes || [],
-          archived: raw.archived ?? false,
+    const unsubContacts = onSnapshot(
+      collection(db, "contacts"),
+      (snap) => {
+        const data: Contact[] = [];
+
+        snap.forEach((d) => {
+          const raw = d.data();
+
+          data.push({
+            id: d.id,
+            name: raw.name || "",
+            role: raw.role || "",
+            email: raw.email || "",
+            phone: raw.phone || "",
+            alertTypes: raw.alertTypes || [],
+            archived: raw.archived ?? false,
+          });
         });
-      });
-      setContacts(data);
-    });
+
+        setContacts(data);
+      }
+    );
 
     // --- Settings ---
-    const unsubSettings = onSnapshot(doc(db, "settings", "global"), (snap) => {
-      if (snap.exists()) {
-        setSettings(snap.data() as SystemSettings);
+    const unsubSettings = onSnapshot(
+      doc(db, "settings", "global"),
+      (snap) => {
+        if (snap.exists()) {
+          setSettings(
+            snap.data() as SystemSettings
+          );
+        }
       }
-    });
+    );
 
     return () => {
       unsubSensors();
@@ -319,342 +383,400 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     };
   }, [seeded]);
 
-  // ── 3. Automated Dispatch Simulation (unchanged logic) ────────
+  // ── 3. Automated Alert Dispatch ───────────────────────────────
   const dispatchAlert = (alert: Alert) => {
-    const relevantContacts = contacts.filter((c: Contact) =>
-      !c.archived &&
-      (c.alertTypes.includes(alert.type) || (alert.severity === 'critical' && c.alertTypes.includes('critical')))
+    const relevantContacts = contacts.filter(
+      (c: Contact) =>
+        !c.archived &&
+        (
+          c.alertTypes.includes(alert.type) ||
+          (
+            alert.severity === "critical" &&
+            c.alertTypes.includes("critical")
+          )
+        )
     );
 
     if (relevantContacts.length === 0) return;
 
     if (settings.telegramAlerts) {
-      console.log(`[TELEGRAM DISPATCH] Sending to ${relevantContacts.length} contacts: ${alert.message}`);
-      toast.success(`Telegram notification sent to ${relevantContacts.length} staff members.`);
+      console.log(
+        `[TELEGRAM DISPATCH] Sending to ${relevantContacts.length} contacts: ${alert.message}`
+      );
+
+      toast.success(
+        `Telegram notification sent to ${relevantContacts.length} staff members.`
+      );
     }
 
     if (settings.emailAlerts) {
-      console.log(`[EMAIL DISPATCH] Sending to ${relevantContacts.length} contacts: ${alert.message}`);
+      console.log(
+        `[EMAIL DISPATCH] Sending to ${relevantContacts.length} contacts: ${alert.message}`
+      );
     }
   };
 
-  // ── 4. Hardware Trigger Simulation ────────────────────────────
+  // ── 4. Hardware Trigger ──────────────────────────────────────
   const triggerBuzzer = (sensorName: string) => {
-    console.log(`[HARDWARE BUZZER] ALARM ACTIVATED AT ${sensorName}`);
-    toast.error(`🔊 LOCAL BUZZER ACTIVATED: Security Breach at ${sensorName}`, {
-      duration: 10000,
-      className: 'bg-red-600 text-white font-bold',
-    });
+    console.log(
+      `[HARDWARE BUZZER] ALARM ACTIVATED AT ${sensorName}`
+    );
+
+    toast.error(
+      `🔊 LOCAL BUZZER ACTIVATED: Security Breach at ${sensorName}`,
+      {
+        duration: 10000,
+        className: "bg-red-600 text-white font-bold",
+      }
+    );
   };
 
-  // ── 5. Check sensors and generate alerts ──────────────────────
-  const checkSensorsForAlerts = (sensorData: SensorData[]): Omit<Alert, 'id'>[] => {
-    const newAlerts: Omit<Alert, 'id'>[] = [];
+  // ── 5. Check sensors and generate alerts ─────────────────────
+  const checkSensorsForAlerts = (
+    sensorData: SensorData[]
+  ): Omit<Alert, "id">[] => {
+    const newAlerts: Omit<Alert, "id">[] = [];
 
     let motionAlertCount = 0;
     const maxMotionAlerts = 2;
 
-    sensorData.filter(s => !s.archived).forEach((sensor) => {
-      // Temperature alerts
-      if (sensor.temperature > sensor.tempThreshold) {
-        newAlerts.push({
-          type: "environmental",
-          severity: sensor.temperature > sensor.tempThreshold + 2 ? "critical" : "warning",
-          message: `High Temperature: ${sensor.temperature}°C exceeds threshold of ${sensor.tempThreshold}°C at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-      }
+    sensorData
+      .filter((s) => !s.archived)
+      .forEach((sensor) => {
+        // Temperature alerts
+        if (sensor.temperature > sensor.tempThreshold) {
+          newAlerts.push({
+            type: "environmental",
+            severity:
+              sensor.temperature >
+              sensor.tempThreshold + 2
+                ? "critical"
+                : "warning",
+            message:
+              `High Temperature: ${sensor.temperature}°C ` +
+              `exceeds threshold of ${sensor.tempThreshold}°C ` +
+              `at ${sensor.name}`,
+            sensorId: sensor.id,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+        }
 
-      // Humidity alerts
-      if (sensor.humidity > sensor.humidityThreshold) {
-        newAlerts.push({
-          type: "environmental",
-          severity: sensor.humidity > sensor.humidityThreshold + 10 ? "critical" : "warning",
-          message: `High Humidity: ${sensor.humidity}% exceeds threshold of ${sensor.humidityThreshold}% at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-      }
+        // Humidity alerts
+        if (sensor.humidity > sensor.humidityThreshold) {
+          newAlerts.push({
+            type: "environmental",
+            severity:
+              sensor.humidity >
+              sensor.humidityThreshold + 10
+                ? "critical"
+                : "warning",
+            message:
+              `High Humidity: ${sensor.humidity}% ` +
+              `exceeds threshold of ${sensor.humidityThreshold}% ` +
+              `at ${sensor.name}`,
+            sensorId: sensor.id,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+        }
 
-      // Motion alerts
-      if (sensor.motionDetected && motionAlertCount < maxMotionAlerts) {
-        newAlerts.push({
-          type: "security",
-          severity: "critical",
-          message: `⚠️ PROXIMITY BREACH: Visitor touched artifact at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-        motionAlertCount++;
-      }
-    });
+        // Motion alerts
+        if (
+          sensor.motionDetected &&
+          motionAlertCount < maxMotionAlerts
+        ) {
+          newAlerts.push({
+            type: "security",
+            severity: "critical",
+            message:
+              `⚠️ PROXIMITY BREACH: Visitor touched artifact ` +
+              `at ${sensor.name}`,
+            sensorId: sensor.id,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+
+          motionAlertCount++;
+        }
+      });
 
     return newAlerts;
   };
 
-  // ── 6. Alert escalation check — escalate unacknowledged alerts after 15 min ──
+  // ── 6. Alert escalation ───────────────────────────────────────
   useEffect(() => {
     if (!seeded) return;
-    const escalationInterval = setInterval(async () => {
-      const now = Date.now();
-      const ESCALATION_THRESHOLD_MS = 15 * 60 * 1000;
 
-      for (const alert of alerts) {
-        if (
-          !alert.acknowledged &&
-          !alert.escalated &&
-          now - alert.timestamp.getTime() > ESCALATION_THRESHOLD_MS
-        ) {
-          toast.warning(`🚨 ESCALATED: ${alert.message}`, { duration: 8000 });
-          await updateDoc(doc(db, "alerts", alert.id), {
-            escalated: true,
-            escalatedAt: Timestamp.now(),
-          });
+    const escalationInterval = setInterval(
+      async () => {
+        const now = Date.now();
+        const ESCALATION_THRESHOLD_MS =
+          15 * 60 * 1000;
+
+        for (const alert of alerts) {
+          if (
+            !alert.acknowledged &&
+            !alert.escalated &&
+            now - alert.timestamp.getTime() >
+              ESCALATION_THRESHOLD_MS
+          ) {
+            toast.warning(
+              `🚨 ESCALATED: ${alert.message}`,
+              { duration: 8000 }
+            );
+
+            await updateDoc(
+              doc(db, "alerts", alert.id),
+              {
+                escalated: true,
+                escalatedAt: Timestamp.now(),
+              }
+            );
+          }
         }
-      }
-    }, 30_000);
+      },
+      30_000
+    );
 
-    return () => clearInterval(escalationInterval);
+    return () =>
+      clearInterval(escalationInterval);
   }, [seeded, alerts]);
 
-  // ── 7. Simulation: periodic sensor updates → Firestore (Option B) ─
-  useEffect(() => {
-    if (!seeded || sensors.length === 0) return;
+  // ── Actions ───────────────────────────────────────────────────
 
-    const updateIntervalMs = settings.reportingIntervalSeconds * 1000;
-
-    const interval = setInterval(async () => {
-      const batch = writeBatch(db);
-      const updatedSensors: SensorData[] = [];
-
-      sensors.forEach((sensor) => {
-        if (sensor.archived) {
-          updatedSensors.push(sensor);
-          return;
-        }
-
-        const tempChange = (Math.random() - 0.5) * 0.5;
-        const humChange = (Math.random() - 0.5) * 2;
-        const newTemp = parseFloat((sensor.temperature + tempChange).toFixed(1));
-        const newHum = parseFloat(Math.max(0, Math.min(100, sensor.humidity + humChange)).toFixed(1));
-        const motionDetected = Math.random() > 0.99;
-
-        let status: "safe" | "warning" | "critical" | "offline" = "safe";
-        if (motionDetected) {
-          status = "critical";
-        } else if (newTemp > sensor.tempThreshold || newHum > sensor.humidityThreshold) {
-          status = "warning";
-        }
-        if (Math.random() > 0.995) {
-          status = "offline";
-        }
-
-        const updatedSensor = {
-          ...sensor,
-          temperature: status === 'offline' ? sensor.temperature : newTemp,
-          humidity: status === 'offline' ? sensor.humidity : newHum,
-          motionDetected,
-          status,
-          lastUpdated: new Date(),
-        };
-
-        updatedSensors.push(updatedSensor);
-
-        // Write updated sensor to Firestore
-        const sensorRef = doc(db, "sensors", sensor.id);
-        batch.update(sensorRef, {
-          temperature: updatedSensor.temperature,
-          humidity: updatedSensor.humidity,
-          motionDetected: updatedSensor.motionDetected,
-          status: updatedSensor.status,
-          lastUpdated: Timestamp.now(),
-        });
-      });
-
-      try {
-        await batch.commit();
-      } catch (error) {
-        console.error("[SIMULATION] Error writing sensor updates:", error);
-        return;
-      }
-
-      // Check for new alerts
-      const newAlertCandidates = checkSensorsForAlerts(updatedSensors);
-      if (newAlertCandidates.length > 0) {
-        const recentAlertKeys = new Set(
-          alerts
-            .filter((a) => Date.now() - a.timestamp.getTime() < 60000)
-            .map((a) => `${a.sensorId}-${a.type}`)
-        );
-
-        const uniqueNewAlerts = newAlertCandidates.filter((alert) => {
-          const key = `${alert.sensorId}-${alert.type}`;
-          return !recentAlertKeys.has(key);
-        });
-
-        for (const alert of uniqueNewAlerts) {
-          // Write alert to Firestore
-          const alertRef = await addDoc(collection(db, "alerts"), {
-            ...alert,
-            timestamp: Timestamp.fromDate(alert.timestamp),
-          });
-
-          const fullAlert: Alert = { ...alert, id: alertRef.id };
-
-          // Dispatch notifications
-          dispatchAlert(fullAlert);
-
-          // Hardware triggers for critical proximity
-          if (alert.type === 'security' && alert.severity === 'critical') {
-            const sensor = updatedSensors.find((s) => s.id === alert.sensorId);
-            if (sensor) triggerBuzzer(sensor.name);
-          }
-
-          // UI Toast for critical alerts
-          if (alert.severity === "critical") {
-            toast.error(alert.message, {
-              duration: 5000,
-              action: {
-                label: "View Alert",
-                onClick: () => {
-                  if (navigateToAlertsRef.current) {
-                    navigateToAlertsRef.current();
-                  } else {
-                    window.location.href = "/dashboard/alerts";
-                  }
-                },
-              },
-            });
-          }
-
-          // Write log entry to Firestore
-          const sensor = updatedSensors.find((s) => s.id === alert.sensorId);
-          await addDoc(collection(db, "logs"), {
-            timestamp: Timestamp.now(),
-            sensorLocation: sensor?.location || 'Unknown',
-            temperature: sensor?.temperature || 0,
-            humidity: sensor?.humidity || 0,
-            motionDetected: sensor?.motionDetected || false,
-          });
-        }
-      }
-    }, updateIntervalMs);
-
-    return () => clearInterval(interval);
-  }, [seeded, sensors.length, settings.reportingIntervalSeconds, contacts]);
-
-  // ── Actions (write to Firestore) ──────────────────────────────
-  const updateSettings = async (newSettings: SystemSettings) => {
+  const updateSettings = async (
+    newSettings: SystemSettings
+  ) => {
     try {
-      await setDoc(doc(db, "settings", "global"), newSettings);
-      toast.success("Settings updated successfully");
+      await setDoc(
+        doc(db, "settings", "global"),
+        newSettings
+      );
+
+      toast.success(
+        "Settings updated successfully"
+      );
     } catch (error) {
-      console.error("Error updating settings:", error);
-      toast.error("Failed to update settings");
+      console.error(
+        "Error updating settings:",
+        error
+      );
+
+      toast.error(
+        "Failed to update settings"
+      );
     }
   };
 
-  const updateSensorSettings = async (sensorId: string, tempThreshold: number, humidityThreshold: number, motionThreshold: number, distanceThreshold: number) => {
+  const updateSensorSettings = async (
+    sensorId: string,
+    tempThreshold: number,
+    humidityThreshold: number,
+    motionThreshold: number,
+    distanceThreshold: number
+  ) => {
     try {
-      await updateDoc(doc(db, "sensors", sensorId), {
-        tempThreshold, humidityThreshold, motionThreshold, distanceThreshold
-      });
-      toast.success("Sensor settings updated successfully");
+      await updateDoc(
+        doc(db, "sensors", sensorId),
+        {
+          tempThreshold,
+          humidityThreshold,
+          motionThreshold,
+          distanceThreshold,
+        }
+      );
+
+      toast.success(
+        "Sensor settings updated successfully"
+      );
     } catch (error) {
-      console.error("Error updating sensor settings:", error);
-      toast.error("Failed to update sensor settings");
+      console.error(
+        "Error updating sensor settings:",
+        error
+      );
+
+      toast.error(
+        "Failed to update sensor settings"
+      );
     }
   };
 
-  const acknowledgeAlert = async (alertId: string, acknowledgedBy?: string) => {
+  const acknowledgeAlert = async (
+    alertId: string,
+    acknowledgedBy?: string
+  ) => {
     try {
-      await updateDoc(doc(db, "alerts", alertId), {
-        acknowledged: true,
-        acknowledgedBy: acknowledgedBy || 'System',
-        acknowledgedAt: Timestamp.now(),
-      });
+      await updateDoc(
+        doc(db, "alerts", alertId),
+        {
+          acknowledged: true,
+          acknowledgedBy:
+            acknowledgedBy || "System",
+          acknowledgedAt: Timestamp.now(),
+        }
+      );
+
       toast.success("Alert acknowledged");
     } catch (error) {
-      console.error("Error acknowledging alert:", error);
-      toast.error("Failed to acknowledge alert");
+      console.error(
+        "Error acknowledging alert:",
+        error
+      );
+
+      toast.error(
+        "Failed to acknowledge alert"
+      );
     }
   };
 
-  const archiveSensor = async (sensorId: string) => {
+  const archiveSensor = async (
+    sensorId: string
+  ) => {
     try {
-      await updateDoc(doc(db, "sensors", sensorId), { archived: true });
-      toast.success("Sensor archived. Historical data and alerts are preserved.");
+      await updateDoc(
+        doc(db, "sensors", sensorId),
+        { archived: true }
+      );
+
+      toast.success(
+        "Sensor archived. Historical data and alerts are preserved."
+      );
     } catch (error) {
-      console.error("Error archiving sensor:", error);
-      toast.error("Failed to archive sensor");
+      console.error(
+        "Error archiving sensor:",
+        error
+      );
+
+      toast.error(
+        "Failed to archive sensor"
+      );
     }
   };
 
-  const addSensor = async (name: string, location: string) => {
+  const addSensor = async (
+    name: string,
+    location: string
+  ) => {
     try {
-      await addDoc(collection(db, "sensors"), {
-        name,
-        location,
-        temperature: 20,
-        humidity: 45,
-        motionDetected: false,
-        status: "safe",
-        lastUpdated: Timestamp.now(),
-        tempThreshold: 24,
-        humidityThreshold: 60,
-        motionThreshold: settings.motionThreshold,
-        distanceThreshold: settings.distanceThreshold,
-        archived: false,
-      });
-      toast.success("Sensor added successfully");
+      await addDoc(
+        collection(db, "sensors"),
+        {
+          name,
+          location,
+          temperature: 20,
+          humidity: 45,
+          motionDetected: false,
+          status: "safe",
+          lastUpdated: Timestamp.now(),
+          tempThreshold: 24,
+          humidityThreshold: 60,
+          motionThreshold:
+            settings.motionThreshold,
+          distanceThreshold:
+            settings.distanceThreshold,
+          archived: false,
+        }
+      );
+
+      toast.success(
+        "Sensor added successfully"
+      );
     } catch (error) {
-      console.error("Error adding sensor:", error);
-      toast.error("Failed to add sensor");
+      console.error(
+        "Error adding sensor:",
+        error
+      );
+
+      toast.error(
+        "Failed to add sensor"
+      );
     }
   };
 
-  const setNavigateToAlerts = (callback: () => void) => {
+  const setNavigateToAlerts = (
+    callback: () => void
+  ) => {
     navigateToAlertsRef.current = callback;
   };
 
-  const addContact = async (contact: Omit<Contact, 'id' | 'archived'>) => {
+  const addContact = async (
+    contact: Omit<Contact, "id" | "archived">
+  ) => {
     try {
-      await addDoc(collection(db, "contacts"), {
-        ...contact,
-        archived: false,
-      });
-      toast.success("Contact added successfully");
+      await addDoc(
+        collection(db, "contacts"),
+        {
+          ...contact,
+          archived: false,
+        }
+      );
+
+      toast.success(
+        "Contact added successfully"
+      );
     } catch (error) {
-      console.error("Error adding contact:", error);
-      toast.error("Failed to add contact");
+      console.error(
+        "Error adding contact:",
+        error
+      );
+
+      toast.error(
+        "Failed to add contact"
+      );
     }
   };
 
-  const updateContact = async (contact: Contact) => {
+  const updateContact = async (
+    contact: Contact
+  ) => {
     try {
       const { id, ...data } = contact;
-      await updateDoc(doc(db, "contacts", id), data);
-      toast.success("Contact updated successfully");
+
+      await updateDoc(
+        doc(db, "contacts", id),
+        data
+      );
+
+      toast.success(
+        "Contact updated successfully"
+      );
     } catch (error) {
-      console.error("Error updating contact:", error);
-      toast.error("Failed to update contact");
+      console.error(
+        "Error updating contact:",
+        error
+      );
+
+      toast.error(
+        "Failed to update contact"
+      );
     }
   };
 
-  const archiveContact = async (id: string) => {
+  const archiveContact = async (
+    id: string
+  ) => {
     try {
-      await updateDoc(doc(db, "contacts", id), { archived: true });
-      toast.success("Contact archived. Historical records are preserved.");
+      await updateDoc(
+        doc(db, "contacts", id),
+        { archived: true }
+      );
+
+      toast.success(
+        "Contact archived. Historical records are preserved."
+      );
     } catch (error) {
-      console.error("Error archiving contact:", error);
-      toast.error("Failed to archive contact");
+      console.error(
+        "Error archiving contact:",
+        error
+      );
+
+      toast.error(
+        "Failed to archive contact"
+      );
     }
   };
 
@@ -684,8 +806,12 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
 export const useMuseum = () => {
   const context = useContext(MuseumContext);
+
   if (context === undefined) {
-    throw new Error("useMuseum must be used within a MuseumProvider");
+    throw new Error(
+      "useMuseum must be used within a MuseumProvider"
+    );
   }
+
   return context;
 };
