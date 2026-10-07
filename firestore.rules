@@ -17,10 +17,12 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if signedIn();
-      allow create: if signedIn()
-        && (request.auth.uid == userId || isAdmin())
-        && request.resource.data.keys().hasAll(['username', 'email', 'role'])
-        && request.resource.data.role in ['admin', 'curator'];
+      // Admins create staff profiles; users may create/update their own profile doc
+      allow create: if isAdmin()
+        || (signedIn()
+          && request.auth.uid == userId
+          && request.resource.data.keys().hasAll(['username', 'email', 'role'])
+          && request.resource.data.role in ['admin', 'curator']);
       allow update: if signedIn()
         && (request.auth.uid == userId || isAdmin());
       allow delete: if isAdmin();

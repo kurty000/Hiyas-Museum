@@ -1,8 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { initializeApp, deleteApp } from 'firebase/app';
-import { signInWithEmailAndPassword, signOut, onAuthStateChanged, User as FirebaseUser, getAuth as getSecondaryAuth, createUserWithEmailAndPassword } from 'firebase/auth';
-import { collection, doc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, Timestamp } from 'firebase/firestore';
+import { signInWithEmailAndPassword, signOut, onAuthStateChanged, getAuth as getSecondaryAuth, createUserWithEmailAndPassword } from 'firebase/auth';
+import { collection, doc, getDoc, setDoc, updateDoc, onSnapshot, Timestamp } from 'firebase/firestore';
 import { auth, db, firebaseConfig } from '../firebase';
+import { toast } from 'sonner';
 
 export interface User {
   username: string;
@@ -92,27 +93,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const unsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
-      const usersData: ManagedUser[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        usersData.push({
-          id: doc.id,
-          username: data.username || '',
-          email: data.email || '',
-          role: data.role || 'curator',
-          createdAt: data.createdAt?.toDate() || new Date(),
-          lastLogin: data.lastLogin?.toDate(),
-          archived: data.archived || false,
-          failedAttempts: data.failedAttempts || 0,
-          lockedUntil: data.lockedUntil?.toDate(),
+    const unsubscribe = onSnapshot(
+      collection(db, 'users'),
+      (snapshot) => {
+        const usersData: ManagedUser[] = [];
+        snapshot.forEach((userSnap) => {
+          const data = userSnap.data();
+          usersData.push({
+            id: userSnap.id,
+            username: data.username || '',
+            email: data.email || '',
+            role: data.role === 'admin' ? 'admin' : 'curator',
+            createdAt: data.createdAt?.toDate?.() || new Date(),
+            lastLogin: data.lastLogin?.toDate?.(),
+            archived: Boolean(data.archived),
+            failedAttempts: data.failedAttempts || 0,
+            lockedUntil: data.lockedUntil?.toDate?.(),
+          });
         });
-      });
-      setManagedUsers(usersData);
-    });
+        // Stable sort so new rows are easy to spot
+        usersData.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        setManagedUsers(usersData);
+      },
+      (error) => {
+        console.error('Users list listener failed:', error);
+        toast.error('Could not load staff accounts. Check Firestore permissions.');
+      }
+    );
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user?.role]);
 
 
   // --- Session Timeout: track user activity ---
@@ -171,29 +181,78 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // --- User management ---
   const addUser = async (username: string, email: string, password: string, role: 'admin' | 'curator') => {
+    if (!auth.currentUser) {
+      throw new Error('You must be signed in as an admin to create accounts.');
+    }
+    if (user?.role !== 'admin') {
+      throw new Error('Only admins can create staff accounts.');
+    }
+
+    const secondaryApp = initializeApp(firebaseConfig, `SecondaryApp-${Date.now()}`);
+    const secondaryAuth = getSecondaryAuth(secondaryApp);
+
     try {
-      // Use a secondary app instance to create the user without logging out the current admin
-      const secondaryApp = initializeApp(firebaseConfig, `SecondaryApp-${Date.now()}`);
-      const secondaryAuth = getSecondaryAuth(secondaryApp);
-      
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, email, password);
-      
-      // Write metadata to Firestore using the real UID from Auth
-      const docRef = doc(db, 'users', userCredential.user.uid);
-      await setDoc(docRef, {
-        username,
-        email,
+      // Secondary app keeps the admin session on the primary app intact
+      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, email.trim(), password);
+      const uid = userCredential.user.uid;
+
+      // Sign out the new user from the secondary app before tearing it down
+      try {
+        await signOut(secondaryAuth);
+      } catch {
+        /* ignore */
+      }
+
+      if (!auth.currentUser) {
+        throw new Error('Admin session was lost while creating the account. Please sign in again.');
+      }
+
+      const profile = {
+        username: username.trim(),
+        email: email.trim().toLowerCase(),
         role,
         createdAt: Timestamp.now(),
         archived: false,
-        failedAttempts: 0
+        failedAttempts: 0,
+      };
+
+      // Primary app auth (admin) writes the Firestore profile so it shows in the table
+      await setDoc(doc(db, 'users', uid), profile);
+
+      // Optimistic UI — onSnapshot will reconcile shortly after
+      setManagedUsers((prev) => {
+        if (prev.some((u) => u.id === uid)) return prev;
+        return [
+          {
+            id: uid,
+            username: profile.username,
+            email: profile.email,
+            role,
+            createdAt: new Date(),
+            archived: false,
+            failedAttempts: 0,
+          },
+          ...prev,
+        ];
       });
-      
-      // Clean up the secondary app
-      await deleteApp(secondaryApp);
-    } catch (error) {
-      console.error("Error adding user", error);
-      throw error;
+    } catch (error: any) {
+      console.error('Error adding user', error);
+      if (error?.code === 'auth/email-already-in-use') {
+        throw new Error('That email is already registered.');
+      }
+      if (error?.code === 'auth/weak-password') {
+        throw new Error('Password should be at least 6 characters.');
+      }
+      if (error?.code === 'permission-denied') {
+        throw new Error('Firestore blocked saving the user profile. Deploy updated security rules or check admin role.');
+      }
+      throw new Error(error?.message || 'Failed to create account.');
+    } finally {
+      try {
+        await deleteApp(secondaryApp);
+      } catch {
+        /* ignore */
+      }
     }
   };
 
