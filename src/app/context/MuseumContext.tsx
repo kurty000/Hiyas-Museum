@@ -181,84 +181,38 @@ const toDate = (val: any): Date | undefined => {
   return undefined;
 };
 
-// ── Seed helpers (migrate mock data into Firestore on first run) ──
-const generateInitialSensors = (): Omit<SensorData, 'id'>[] => {
-  const galleries = ["Gallery A", "Gallery B", "Gallery C", "Main Hall"];
-  const artifacts = ["Artifact 1", "Artifact 2", "Artifact 3"];
-  const sensors: Omit<SensorData, 'id'>[] = [];
+// Remove auto-generated demo sensors. Keep only ESP hardware + manually added ones.
+async function cleanupDemoSensors() {
+  const sensorsSnap = await getDocs(collection(db, "sensors"));
+  if (sensorsSnap.empty) return;
 
-  galleries.forEach((gallery, gIndex) => {
-    artifacts.slice(0, gIndex === 0 ? 3 : 2).forEach((artifact) => {
-      const temp = 20 + Math.random() * 5;
-      const humidity = 45 + Math.random() * 20;
+  const batch = writeBatch(db);
+  let removed = 0;
 
-      sensors.push({
-        name: `${gallery} - ${artifact}`,
-        location: gallery,
-        temperature: parseFloat(temp.toFixed(1)),
-        humidity: parseFloat(humidity.toFixed(1)),
-        motionDetected: false,
-        status: "safe",
-        lastUpdated: new Date(),
-        tempThreshold: 24,
-        humidityThreshold: 60,
-        motionThreshold: 5,
-        distanceThreshold: DISTANCE_CM_DEFAULT,
-        archived: false,
-      });
-    });
+  sensorsSnap.forEach((sensorDoc) => {
+    const data = sensorDoc.data();
+    const keep =
+      data.hardware === true ||
+      data.source === "esp32" ||
+      data.source === "manual" ||
+      String(sensorDoc.id).startsWith("esp32");
+
+    if (!keep) {
+      batch.delete(sensorDoc.ref);
+      removed += 1;
+    }
   });
 
-  return sensors;
-};
+  if (removed > 0) {
+    await batch.commit();
+    console.log(`[CLEANUP] Removed ${removed} demo sensor(s)`);
+  }
+}
 
-const INITIAL_CONTACTS: Omit<Contact, 'id'>[] = [
-  {
-    name: "John Smith",
-    role: "Security Chief",
-    email: "john.smith@museum.com",
-    phone: "+1 (555) 123-4567",
-    alertTypes: ["security", "critical"],
-    archived: false,
-  },
-  {
-    name: "Maria Garcia",
-    role: "Lead Curator",
-    email: "maria.garcia@museum.com",
-    phone: "+1 (555) 234-5678",
-    alertTypes: ["environmental", "security"],
-    archived: false,
-  },
-];
-
-// Seed Firestore with initial data if collections are empty
+// Seed only global settings if missing — never invent sensors
 async function seedFirestoreIfEmpty() {
-  // Seed sensors
-  const sensorsSnap = await getDocs(collection(db, "sensors"));
-  if (sensorsSnap.empty) {
-    const batch = writeBatch(db);
-    const initialSensors = generateInitialSensors();
-    initialSensors.forEach((sensor) => {
-      const ref = doc(collection(db, "sensors"));
-      batch.set(ref, { ...sensor, lastUpdated: Timestamp.now() });
-    });
-    await batch.commit();
-    console.log("[SEED] Seeded sensors collection");
-  }
+  await cleanupDemoSensors();
 
-  // Seed contacts
-  const contactsSnap = await getDocs(collection(db, "contacts"));
-  if (contactsSnap.empty) {
-    const batch = writeBatch(db);
-    INITIAL_CONTACTS.forEach((contact) => {
-      const ref = doc(collection(db, "contacts"));
-      batch.set(ref, contact);
-    });
-    await batch.commit();
-    console.log("[SEED] Seeded contacts collection");
-  }
-
-  // Seed settings
   const settingsSnap = await getDocs(collection(db, "settings"));
   if (settingsSnap.empty) {
     await setDoc(doc(db, "settings", "global"), DEFAULT_SETTINGS);
