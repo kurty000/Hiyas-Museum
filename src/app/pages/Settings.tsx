@@ -41,12 +41,12 @@ import {
   TableRow,
 } from "../components/ui/table";
 import { Badge } from "../components/ui/badge";
-import { Users, UserPlus, Mail, Phone, Edit, Archive, Bell, Shield, Settings as SettingsIcon, Clock, Database, Wifi, Server } from "lucide-react";
+import { Users, UserPlus, Mail, Phone, Edit, Archive, Bell, Shield } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Settings() {
-  const { contacts, addContact, updateContact, archiveContact, settings, updateSettings } = useMuseum();
-  const { managedUsers, addUser, archiveUser, isAdmin } = useAuth();
+  const { contacts, addContact, updateContact, archiveContact } = useMuseum();
+  const { managedUsers, addUser, archiveUser } = useAuth();
 
   // Only show active (non-archived) contacts and users
   const activeContacts = contacts.filter((c: any) => !c.archived);
@@ -73,16 +73,8 @@ export default function Settings() {
   const [isAccountDialogOpen, setIsAccountDialogOpen] = useState(false);
   const [confirmAddContactOpen, setConfirmAddContactOpen] = useState(false);
   const [confirmAddAccountOpen, setConfirmAddAccountOpen] = useState(false);
+  const [creatingAccount, setCreatingAccount] = useState(false);
   const [editingContact, setEditingContact] = useState<typeof contacts[0] | null>(null);
-
-  // System settings form state
-  const [reportingInterval, setReportingInterval] = useState(settings.reportingIntervalSeconds.toString());
-  const [dataRetention, setDataRetention] = useState(settings.dataRetentionMonths.toString());
-  const [wifiSSID, setWifiSSID] = useState(settings.wifiSSID || "");
-  const [wifiPassword, setWifiPassword] = useState(settings.wifiPassword || "");
-  const [mqttBroker, setMqttBroker] = useState(settings.mqttBroker || "");
-  const [mqttPort, setMqttPort] = useState(settings.mqttPort || "");
-  const [mqttTopic, setMqttTopic] = useState(settings.mqttTopic || "");
 
   // Contact Management Functions
   const handlePrepareAddContact = () => {
@@ -121,10 +113,19 @@ export default function Settings() {
     setConfirmAddAccountOpen(true);
   };
 
-  const handleConfirmAddAccount = () => {
-    addUser(newAccount.username, newAccount.email, newAccount.password, newAccount.role);
-    setNewAccount({ username: "", email: "", password: "", role: "curator" });
-    setConfirmAddAccountOpen(false);
+  const handleConfirmAddAccount = async () => {
+    const account = { ...newAccount };
+    setCreatingAccount(true);
+    try {
+      await addUser(account.username, account.email, account.password, account.role);
+      toast.success(`Account created for ${account.username}`);
+      setNewAccount({ username: "", email: "", password: "", role: "curator" });
+      setConfirmAddAccountOpen(false);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to create account");
+    } finally {
+      setCreatingAccount(false);
+    }
   };
 
   const handleCancelAddAccount = () => {
@@ -149,29 +150,6 @@ export default function Settings() {
     }
   };
 
-  const handleSaveSystemSettings = () => {
-    const intervalNum = parseInt(reportingInterval, 10);
-    const retentionNum = parseInt(dataRetention, 10);
-    if (isNaN(intervalNum) || intervalNum < 5) {
-      toast.error("Reporting interval must be at least 5 seconds");
-      return;
-    }
-    if (isNaN(retentionNum) || retentionNum < 1) {
-      toast.error("Data retention must be at least 1 month");
-      return;
-    }
-    updateSettings({
-      ...settings,
-      reportingIntervalSeconds: intervalNum,
-      dataRetentionMonths: retentionNum,
-      wifiSSID,
-      wifiPassword,
-      mqttBroker,
-      mqttPort,
-      mqttTopic
-    });
-  };
-
   return (
     <div className="space-y-8">
       {/* Header */}
@@ -179,147 +157,6 @@ export default function Settings() {
         <h1 className="text-3xl font-bold text-gray-900">Manage Users</h1>
         <p className="text-gray-600 mt-1">Manage staff accounts and alert contacts</p>
       </div>
-
-      {/* System Configuration Section (Admin Only) */}
-      {isAdmin && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-3">
-              <div className="bg-gray-100 p-2 rounded-lg">
-                <SettingsIcon className="w-5 h-5 text-gray-600" />
-              </div>
-              <div>
-                <CardTitle>System Configuration</CardTitle>
-                <CardDescription>
-                  Configure reporting intervals and data retention policies
-                </CardDescription>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Reporting Interval */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-blue-600" />
-                  <Label htmlFor="reporting-interval" className="text-sm font-medium">
-                    Node Reporting Interval (seconds)
-                  </Label>
-                </div>
-                <Input
-                  id="reporting-interval"
-                  type="number"
-                  min={5}
-                  value={reportingInterval}
-                  onChange={(e: any) => setReportingInterval(e.target.value)}
-                />
-                <p className="text-xs text-gray-500">Default: 15 seconds. Minimum: 5 seconds.</p>
-              </div>
-
-              {/* Data Retention */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Database className="w-4 h-4 text-green-600" />
-                  <Label htmlFor="data-retention" className="text-sm font-medium">
-                    Data Retention (months)
-                  </Label>
-                </div>
-                <Input
-                  id="data-retention"
-                  type="number"
-                  min={1}
-                  value={dataRetention}
-                  onChange={(e: any) => setDataRetention(e.target.value)}
-                />
-                <p className="text-xs text-gray-500">Default: 12 months. Historical records are purged after this.</p>
-              </div>
-
-              {/* Wi-Fi Configuration */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Wifi className="w-4 h-4 text-blue-500" />
-                  <Label htmlFor="wifi-ssid" className="text-sm font-medium">
-                    Wi-Fi SSID
-                  </Label>
-                </div>
-                <Input
-                  id="wifi-ssid"
-                  placeholder="Museum-IoT-Net"
-                  value={wifiSSID}
-                  onChange={(e: any) => setWifiSSID(e.target.value)}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Wifi className="w-4 h-4 text-gray-400" />
-                  <Label htmlFor="wifi-password" className="text-sm font-medium">
-                    Wi-Fi Password
-                  </Label>
-                </div>
-                <Input
-                  id="wifi-password"
-                  type="password"
-                  placeholder="••••••••"
-                  value={wifiPassword}
-                  onChange={(e: any) => setWifiPassword(e.target.value)}
-                />
-              </div>
-
-              {/* MQTT Configuration */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Server className="w-4 h-4 text-purple-500" />
-                  <Label htmlFor="mqtt-broker" className="text-sm font-medium">
-                    MQTT Broker
-                  </Label>
-                </div>
-                <Input
-                  id="mqtt-broker"
-                  placeholder="mqtt.museum.local"
-                  value={mqttBroker}
-                  onChange={(e: any) => setMqttBroker(e.target.value)}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Server className="w-4 h-4 text-gray-400" />
-                  <Label htmlFor="mqtt-port" className="text-sm font-medium">
-                    MQTT Port
-                  </Label>
-                </div>
-                <Input
-                  id="mqtt-port"
-                  placeholder="1883"
-                  value={mqttPort}
-                  onChange={(e: any) => setMqttPort(e.target.value)}
-                />
-              </div>
-
-              <div className="space-y-2 md:col-span-2">
-                <div className="flex items-center gap-2">
-                  <Server className="w-4 h-4 text-gray-400" />
-                  <Label htmlFor="mqtt-topic" className="text-sm font-medium">
-                    MQTT Base Topic
-                  </Label>
-                </div>
-                <Input
-                  id="mqtt-topic"
-                  placeholder="museum/sensors/+"
-                  value={mqttTopic}
-                  onChange={(e: any) => setMqttTopic(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="mt-4">
-              <Button onClick={handleSaveSystemSettings} className="bg-blue-600 hover:bg-blue-700">
-                Save Configuration
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Contact Management Section */}
       <Card>
@@ -700,12 +537,18 @@ export default function Settings() {
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel onClick={handleCancelAddAccount}>Cancel</AlertDialogCancel>
+                  <AlertDialogCancel onClick={handleCancelAddAccount} disabled={creatingAccount}>
+                    Cancel
+                  </AlertDialogCancel>
                   <AlertDialogAction
-                    onClick={handleConfirmAddAccount}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void handleConfirmAddAccount();
+                    }}
+                    disabled={creatingAccount}
                     className="bg-purple-600 hover:bg-purple-700"
                   >
-                    Confirm Create
+                    {creatingAccount ? "Creating..." : "Confirm Create"}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
@@ -725,64 +568,74 @@ export default function Settings() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {activeUsers.map((account: any) => (
-                <TableRow key={account.id}>
-                  <TableCell className="font-medium">{account.username}</TableCell>
-                  <TableCell>{account.email}</TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={account.role === "admin" ? "default" : "secondary"}
-                      className={
-                        account.role === "admin" ? "bg-purple-600" : ""
-                      }
-                    >
-                      {account.role === "admin" ? "👑 Admin" : "👤 Curator"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-sm text-gray-600">
-                    {account.createdAt.toLocaleDateString()}
-                  </TableCell>
-                  <TableCell className="text-sm text-gray-600">
-                    {account.lastLogin
-                      ? account.lastLogin.toLocaleDateString()
-                      : "Never"}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={account.username === "admin"}
-                        >
-                          <Archive
-                            className={`w-4 h-4 ${
-                              account.username === "admin" ? "text-gray-300" : "text-orange-500"
-                            }`}
-                          />
-                        </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Archive Account</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Are you sure you want to archive the account for {account.username}? Historical data will be preserved but they will lose access to the system.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => handleArchiveAccount(account.id)}
-                            className="bg-orange-600 hover:bg-orange-700"
-                          >
-                            Archive
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+              {activeUsers.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center text-gray-500 py-8">
+                    No staff accounts yet. Create an admin or curator account to see it here.
                   </TableCell>
                 </TableRow>
-              ))}
+              ) : (
+                activeUsers.map((account: any) => (
+                  <TableRow key={account.id}>
+                    <TableCell className="font-medium">{account.username}</TableCell>
+                    <TableCell>{account.email}</TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={account.role === "admin" ? "default" : "secondary"}
+                        className={
+                          account.role === "admin" ? "bg-purple-600" : ""
+                        }
+                      >
+                        {account.role === "admin" ? "Admin" : "Curator"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-sm text-gray-600">
+                      {account.createdAt instanceof Date
+                        ? account.createdAt.toLocaleDateString()
+                        : "—"}
+                    </TableCell>
+                    <TableCell className="text-sm text-gray-600">
+                      {account.lastLogin instanceof Date
+                        ? account.lastLogin.toLocaleDateString()
+                        : "Never"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={account.username === "admin"}
+                          >
+                            <Archive
+                              className={`w-4 h-4 ${
+                                account.username === "admin" ? "text-gray-300" : "text-orange-500"
+                              }`}
+                            />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>Archive Account</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              Are you sure you want to archive the account for {account.username}? Historical data will be preserved but they will lose access to the system.
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={() => handleArchiveAccount(account.id)}
+                              className="bg-orange-600 hover:bg-orange-700"
+                            >
+                              Archive
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
             </TableBody>
           </Table>
         </CardContent>
