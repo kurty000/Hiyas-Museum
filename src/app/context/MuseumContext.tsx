@@ -23,6 +23,8 @@ export interface SensorData {
   motionThreshold: number; // 1-10 scale
   distanceThreshold: number; // cm (5–10000) — breach when object is at/closer than this
   archived: boolean; // Soft-delete flag
+  /** True when linked to ESP/RTDB hardware (eligible for offline detection) */
+  hardware?: boolean;
 }
 
 /** ESP/RTDB device seen live but not yet registered as a monitored sensor */
@@ -109,7 +111,39 @@ function computeSensorStatus(input: {
 }
 
 /** Stable condition identity for one-notification-per-event alerting */
-export type AlertConditionKind = "temperature" | "humidity" | "motion" | "distance";
+export type AlertConditionKind = "temperature" | "humidity" | "motion" | "distance" | "offline";
+
+const DEFAULT_OFFLINE_TIMEOUT_SECONDS = 60;
+const OFFLINE_CHECK_INTERVAL_MS = 5_000;
+
+/** Prefer ESP heartbeat timestamp; supports seconds or milliseconds. */
+function extractEspTimestampMs(raw: Record<string, unknown>): number | null {
+  const t = raw.updatedAt ?? raw.timestamp ?? raw.ts ?? raw.time ?? raw.lastUpdated;
+  if (t == null || t === "") return null;
+  if (typeof t === "number" && !Number.isNaN(t)) {
+    return t < 1e12 ? t * 1000 : t;
+  }
+  if (typeof t === "object" && t !== null && "seconds" in t) {
+    const seconds = Number((t as { seconds: number }).seconds);
+    if (!Number.isNaN(seconds)) return seconds * 1000;
+  }
+  const parsed = new Date(String(t)).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function readingFingerprint(partial: {
+  temperature?: number;
+  humidity?: number;
+  motionDetected?: boolean;
+  distanceCm?: number;
+}): string {
+  return [
+    partial.temperature,
+    partial.humidity,
+    partial.motionDetected,
+    partial.distanceCm ?? "",
+  ].join("|");
+}
 
 export interface Alert {
   id: string;
@@ -135,6 +169,7 @@ function alertEventKey(sensorId: string, conditionKind: AlertConditionKind): str
 function inferConditionKind(alert: Pick<Alert, "type" | "message" | "conditionKind">): AlertConditionKind | null {
   if (alert.conditionKind) return alert.conditionKind;
   const msg = alert.message || "";
+  if (/offline|stopped communicating|no data/i.test(msg)) return "offline";
   if (/high temperature/i.test(msg)) return "temperature";
   if (/high humidity/i.test(msg)) return "humidity";
   if (/object at/i.test(msg) || /distance/i.test(msg) || /limit \d+/i.test(msg)) return "distance";
@@ -169,6 +204,8 @@ export interface SystemSettings {
   emailAlerts: boolean;
   telegramAlerts: boolean;
   reportingIntervalSeconds: number; // Default 15
+  /** Seconds without communication before a registered sensor becomes Offline */
+  offlineTimeoutSeconds: number;
   dataRetentionMonths: number; // Default 12
   wifiSSID?: string;
   wifiPassword?: string;
@@ -209,12 +246,19 @@ const DEFAULT_SETTINGS: SystemSettings = {
   emailAlerts: true,
   telegramAlerts: true,
   reportingIntervalSeconds: 15,
+  offlineTimeoutSeconds: DEFAULT_OFFLINE_TIMEOUT_SECONDS,
   dataRetentionMonths: 12,
   wifiSSID: "Museum-Secure-WiFi",
   mqttBroker: "mqtt.museum-iot.local",
   mqttPort: "1883",
   mqttTopic: "museum/sensors/+",
 };
+
+function normalizeOfflineTimeoutSeconds(raw: unknown): number {
+  const n = Number(raw);
+  if (Number.isNaN(n)) return DEFAULT_OFFLINE_TIMEOUT_SECONDS;
+  return Math.min(3600, Math.max(15, Math.round(n)));
+}
 
 // ── Firestore Helpers ──────────────────────────────────────────────
 // Convert Firestore timestamps to JS Dates when reading a document
@@ -278,10 +322,13 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const liveHardwareIdsRef = useRef<Set<string>>(new Set());
   /** Latest ESP readings — always win over static Firestore copies */
   const liveReadingsRef = useRef<Record<string, Partial<SensorData>>>({});
+  /** Last communication time (ms) per registered hardware sensor — kept after RTDB drop */
+  const lastSeenAtRef = useRef<Record<string, number>>({});
   /** Sensors deleted by admin — ignore ESP/RTDB recreate until removed from this set */
   const deletedSensorIdsRef = useRef<Set<string>>(new Set());
   /** Latest sensors snapshot for threshold lookup during RTDB sync */
   const sensorsRef = useRef<SensorData[]>([]);
+  const settingsRef = useRef<SystemSettings>(settings);
   const alertsRef = useRef<Alert[]>([]);
   const publishAlertsRef = useRef<(sensorSnapshot: SensorData[]) => Promise<void>>(
     async () => {}
@@ -294,6 +341,15 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   useEffect(() => {
     sensorsRef.current = sensors;
   }, [sensors]);
+
+  useEffect(() => {
+    settingsRef.current = {
+      ...settings,
+      offlineTimeoutSeconds: normalizeOfflineTimeoutSeconds(
+        settings.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
+      ),
+    };
+  }, [settings]);
 
   useEffect(() => {
     alertsRef.current = alerts;
@@ -324,6 +380,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
       return {
         ...existing,
+        hardware: true,
         temperature,
         humidity,
         motionDetected,
@@ -332,6 +389,81 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         lastUpdated: live.lastUpdated || existing.lastUpdated,
       };
     });
+  };
+
+  /**
+   * Registered hardware sensors → Offline when last communication exceeds timeout.
+   * Reconnect (fresh lastSeen) restores the mergeLive status on the next pass.
+   */
+  const applyOfflineStatus = (sensorList: SensorData[]): SensorData[] => {
+    const timeoutMs =
+      normalizeOfflineTimeoutSeconds(
+        settingsRef.current.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
+      ) * 1000;
+    const now = Date.now();
+
+    return sensorList.map((sensor) => {
+      if (sensor.archived) return sensor;
+
+      const monitored =
+        Boolean(sensor.hardware) ||
+        lastSeenAtRef.current[sensor.id] != null ||
+        liveHardwareIdsRef.current.has(sensor.id);
+
+      if (!monitored) return sensor;
+
+      const lastSeen =
+        lastSeenAtRef.current[sensor.id] ?? sensor.lastUpdated.getTime();
+      if (lastSeenAtRef.current[sensor.id] == null) {
+        lastSeenAtRef.current[sensor.id] = lastSeen;
+      }
+
+      if (now - lastSeen > timeoutMs) {
+        return sensor.status === "offline" ? sensor : { ...sensor, status: "offline" };
+      }
+
+      // Within timeout but no live cache (brief disconnect) — keep last non-offline status
+      if (!liveReadingsRef.current[sensor.id] && sensor.status === "offline") {
+        return { ...sensor, status: "safe" };
+      }
+
+      return sensor;
+    });
+  };
+
+  const refreshSensorConnectivity = (base: SensorData[]): SensorData[] =>
+    applyOfflineStatus(mergeLiveOntoSensors(base));
+
+  /** Persist offline/online transitions and notify once per offline stretch */
+  const commitConnectivityUpdate = (next: SensorData[], prev: SensorData[]) => {
+    queueMicrotask(() => {
+      void publishAlertsRef.current(next);
+    });
+
+    for (const sensor of next) {
+      const monitored =
+        Boolean(sensor.hardware) || lastSeenAtRef.current[sensor.id] != null;
+      if (sensor.archived || !monitored) continue;
+
+      const before = prev.find((s) => s.id === sensor.id);
+      if (!before || before.status === sensor.status) continue;
+      // Only persist offline transitions (and recovery from offline)
+      if (sensor.status !== "offline" && before.status !== "offline") continue;
+
+      void setDoc(
+        doc(db, "sensors", sensor.id),
+        {
+          status: sensor.status,
+          lastUpdated:
+            sensor.status === "offline"
+              ? Timestamp.fromDate(sensor.lastUpdated)
+              : Timestamp.now(),
+        },
+        { merge: true }
+      ).catch((err) =>
+        console.error("[OFFLINE] Failed to persist status for", sensor.id, err)
+      );
+    }
   };
 
   // ── 1. Seed Firestore on first mount (never block the UI if seed fails) ──
@@ -371,9 +503,23 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           motionThreshold: raw.motionThreshold ?? 5,
           distanceThreshold: normalizeThresholdCm(raw.distanceThreshold),
           archived: raw.archived ?? false,
+          hardware: Boolean(raw.hardware || raw.source === "esp32"),
         });
       });
-      setSensors(mergeLiveOntoSensors(data));
+      for (const sensor of data) {
+        if (
+          sensor.hardware &&
+          lastSeenAtRef.current[sensor.id] == null &&
+          sensor.lastUpdated
+        ) {
+          lastSeenAtRef.current[sensor.id] = sensor.lastUpdated.getTime();
+        }
+      }
+      setSensors((prev) => {
+        const next = refreshSensorConnectivity(data);
+        commitConnectivityUpdate(next, prev);
+        return next;
+      });
     });
 
     // --- Alerts ---
@@ -439,7 +585,14 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     // --- Settings ---
     const unsubSettings = onSnapshot(doc(db, "settings", "global"), (snap) => {
       if (snap.exists()) {
-        setSettings(snap.data() as SystemSettings);
+        const rawSettings = snap.data() as SystemSettings;
+        setSettings({
+          ...DEFAULT_SETTINGS,
+          ...rawSettings,
+          offlineTimeoutSeconds: normalizeOfflineTimeoutSeconds(
+            rawSettings.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
+          ),
+        });
       }
     });
 
@@ -494,7 +647,24 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
             const distanceCm = parseDistanceCm(raw.distanceCm);
             const suggestedName = String(raw.name || deviceId);
             const suggestedLocation = String(raw.location || "Unknown");
-            const lastUpdated = new Date();
+
+            const prevLive = liveReadingsRef.current[deviceId];
+            const nextPartial = {
+              temperature,
+              humidity,
+              motionDetected,
+              distanceCm,
+            };
+            const espTs = extractEspTimestampMs(raw as Record<string, unknown>);
+            const changed =
+              !prevLive ||
+              readingFingerprint(prevLive) !== readingFingerprint(nextPartial);
+            // Only bump last-seen when ESP sends a timestamp or readings change.
+            // Parent onValue can re-deliver unchanged siblings when another device updates.
+            const seenAt =
+              espTs ??
+              (changed ? Date.now() : lastSeenAtRef.current[deviceId] ?? Date.now());
+            const lastUpdated = new Date(seenAt);
 
             const livePartial: Partial<SensorData> = {
               name: suggestedName,
@@ -525,6 +695,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
               continue;
             }
 
+            lastSeenAtRef.current[deviceId] = seenAt;
+
             // Registered only: mirror live readings (keep user name/thresholds in Firestore)
             const known = sensorsRef.current.find((s) => s.id === deviceId);
             const status = computeSensorStatus({
@@ -545,7 +717,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
                 motionDetected,
                 distanceCm: distanceCm ?? null,
                 status,
-                lastUpdated: Timestamp.now(),
+                lastUpdated: Timestamp.fromMillis(seenAt),
                 hardware: true,
                 source: "esp32",
                 archived: false,
@@ -554,7 +726,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           }
         }
 
-        // Drop live cache for devices that disappeared from RTDB
+        // Drop live cache for devices that disappeared from RTDB (keep lastSeenAt for timeout)
         for (const id of Object.keys(liveReadingsRef.current)) {
           if (!ids.has(id)) delete liveReadingsRef.current[id];
         }
@@ -565,11 +737,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         );
 
         setSensors((prev) => {
-          const merged = mergeLiveOntoSensors(prev);
-          queueMicrotask(() => {
-            void publishAlertsRef.current(merged);
-          });
-          return merged;
+          const next = refreshSensorConnectivity(prev);
+          commitConnectivityUpdate(next, prev);
+          return next;
         });
 
         for (const { deviceId, payload } of mirrors) {
@@ -586,6 +756,26 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
     return () => unsubLive();
   }, [seeded]);
+
+  // ── 2c. Offline watchdog — poll last-seen even when RTDB is quiet ──
+  useEffect(() => {
+    if (!seeded) return;
+
+    const tick = () => {
+      setSensors((prev) => {
+        const next = refreshSensorConnectivity(prev);
+        const prevStatus = new Map(prev.map((s) => [s.id, s.status]));
+        const changed = next.some((s) => prevStatus.get(s.id) !== s.status);
+        if (!changed) return prev;
+        commitConnectivityUpdate(next, prev);
+        return next;
+      });
+    };
+
+    const interval = setInterval(tick, OFFLINE_CHECK_INTERVAL_MS);
+    tick();
+    return () => clearInterval(interval);
+  }, [seeded, settings.offlineTimeoutSeconds]);
 
   // ── 3. Automated Dispatch Simulation (unchanged logic) ────────
   const dispatchAlert = (alert: Alert) => {
@@ -630,6 +820,26 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     sensorData
       .filter((s) => !s.archived)
       .forEach((sensor) => {
+        // Offline stretch: one notification, no stale reading alerts until reconnect
+        if (sensor.status === "offline") {
+          const kind: AlertConditionKind = "offline";
+          activeKeys.add(alertEventKey(sensor.id, kind));
+          const timeoutSec = normalizeOfflineTimeoutSeconds(
+            settingsRef.current.offlineTimeoutSeconds
+          );
+          candidates.push({
+            type: "environmental",
+            severity: "warning",
+            message: `Sensor Offline: ${sensor.name} stopped communicating for more than ${timeoutSec}s`,
+            sensorId: sensor.id,
+            conditionKind: kind,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+          return;
+        }
+
         if (sensor.temperature > sensor.tempThreshold) {
           const kind: AlertConditionKind = "temperature";
           activeKeys.add(alertEventKey(sensor.id, kind));
@@ -702,15 +912,16 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const publishAlerts = async (sensorSnapshot: SensorData[]) => {
     const { candidates, activeKeys } = collectBreachingConditions(sensorSnapshot);
 
-    // Open events = unacknowledged alerts whose condition is STILL true.
-    // If the condition cleared, that event ended (even if never acknowledged).
+    // Open events = alerts whose condition is STILL true.
+    // Offline: stay silent for the whole offline stretch (even if acknowledged).
+    // Other kinds: silence only while unacknowledged (ack can re-notify if still bad).
     const openEventKeys = new Set<string>();
     for (const existing of alertsRef.current) {
-      if (existing.acknowledged) continue;
       const kind = inferConditionKind(existing);
       if (!kind) continue;
       const key = alertEventKey(existing.sensorId, kind);
-      if (activeKeys.has(key)) {
+      if (!activeKeys.has(key)) continue;
+      if (kind === "offline" || !existing.acknowledged) {
         openEventKeys.add(key);
       }
     }
@@ -845,14 +1056,11 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         } else if (newTemp > sensor.tempThreshold || newHum > sensor.humidityThreshold) {
           status = "warning";
         }
-        if (Math.random() > 0.995) {
-          status = "offline";
-        }
 
         const updatedSensor = {
           ...sensor,
-          temperature: status === 'offline' ? sensor.temperature : newTemp,
-          humidity: status === 'offline' ? sensor.humidity : newHum,
+          temperature: newTemp,
+          humidity: newHum,
           motionDetected,
           status,
           lastUpdated: new Date(),
@@ -923,8 +1131,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         acknowledgedBy: acknowledgedBy || 'System',
         acknowledgedAt: Timestamp.now(),
       });
-      // Acknowledging ends the notification hold for that event.
-      // If the condition is still true, the next publishAlerts pass may send a new notification.
+      // Offline alerts stay silent until the sensor reconnects (then a new offline event can notify).
+      // Other alerts: acknowledging ends the hold; if still breached, a new notify may fire.
       toast.success("Alert acknowledged");
     } catch (error) {
       console.error("Error acknowledging alert:", error);
@@ -954,6 +1162,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       await deleteDoc(doc(db, "sensors", sensorId));
       delete liveReadingsRef.current[sensorId];
       liveHardwareIdsRef.current.delete(sensorId);
+      delete lastSeenAtRef.current[sensorId];
+      delete liveReadingsRef.current[sensorId];
       setSensors((prev) => prev.filter((s) => s.id !== sensorId));
 
       try {
@@ -1006,6 +1216,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         distanceThreshold,
       });
 
+      const registeredAt = Date.now();
+      lastSeenAtRef.current[deviceId] = registeredAt;
+
       await setDoc(
         doc(db, "sensors", deviceId),
         {
@@ -1016,7 +1229,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           motionDetected,
           distanceCm: distanceCm ?? null,
           status,
-          lastUpdated: Timestamp.now(),
+          lastUpdated: Timestamp.fromMillis(registeredAt),
           tempThreshold: input.tempThreshold,
           humidityThreshold: input.humidityThreshold,
           motionThreshold: input.motionThreshold,
