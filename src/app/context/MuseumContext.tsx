@@ -264,6 +264,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   /** Latest sensors snapshot for threshold lookup during RTDB sync */
   const sensorsRef = useRef<SensorData[]>([]);
   const alertsRef = useRef<Alert[]>([]);
+  const publishAlertsRef = useRef<(sensorSnapshot: SensorData[]) => Promise<void>>(
+    async () => {}
+  );
 
   const navigateToAlertsRef = useRef<(() => void) | null>(null);
 
@@ -531,7 +534,14 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       liveHardwareIdsRef.current = ids;
 
       // Push live ESP values into the UI immediately (do not wait for Firestore)
-      setSensors((prev) => mergeLiveOntoSensors(prev));
+      // and evaluate alerts against website thresholds (ESP path used to skip alerts)
+      setSensors((prev) => {
+        const merged = mergeLiveOntoSensors(prev);
+        queueMicrotask(() => {
+          void publishAlertsRef.current(merged);
+        });
+        return merged;
+      });
       },
       (err) => {
         console.error("[LIVE] RTDB /liveSensors read failed:", err);
@@ -702,6 +712,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  publishAlertsRef.current = publishAlerts;
+
   // ── 6. Alert escalation check — escalate unacknowledged alerts after 15 min ──
   useEffect(() => {
     if (!seeded) return;
@@ -794,66 +806,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         return;
       }
 
-      // Check for new alerts
-      const newAlertCandidates = checkSensorsForAlerts(updatedSensors);
-      if (newAlertCandidates.length > 0) {
-        const recentAlertKeys = new Set(
-          alerts
-            .filter((a) => Date.now() - a.timestamp.getTime() < 60000)
-            .map((a) => `${a.sensorId}-${a.type}`)
-        );
-
-        const uniqueNewAlerts = newAlertCandidates.filter((alert) => {
-          const key = `${alert.sensorId}-${alert.type}`;
-          return !recentAlertKeys.has(key);
-        });
-
-        for (const alert of uniqueNewAlerts) {
-          // Write alert to Firestore
-          const alertRef = await addDoc(collection(db, "alerts"), {
-            ...alert,
-            timestamp: Timestamp.fromDate(alert.timestamp),
-          });
-
-          const fullAlert: Alert = { ...alert, id: alertRef.id };
-
-          // Dispatch notifications
-          dispatchAlert(fullAlert);
-
-          // Hardware triggers for critical proximity
-          if (alert.type === 'security' && alert.severity === 'critical') {
-            const sensor = updatedSensors.find((s) => s.id === alert.sensorId);
-            if (sensor) triggerBuzzer(sensor.name);
-          }
-
-          // UI Toast for critical alerts
-          if (alert.severity === "critical") {
-            toast.error(alert.message, {
-              duration: 5000,
-              action: {
-                label: "View Alert",
-                onClick: () => {
-                  if (navigateToAlertsRef.current) {
-                    navigateToAlertsRef.current();
-                  } else {
-                    window.location.href = "/dashboard/alerts";
-                  }
-                },
-              },
-            });
-          }
-
-          // Write log entry to Firestore
-          const sensor = updatedSensors.find((s) => s.id === alert.sensorId);
-          await addDoc(collection(db, "logs"), {
-            timestamp: Timestamp.now(),
-            sensorLocation: sensor?.location || 'Unknown',
-            temperature: sensor?.temperature || 0,
-            humidity: sensor?.humidity || 0,
-            motionDetected: sensor?.motionDetected || false,
-          });
-        }
-      }
+      await publishAlerts(updatedSensors);
     }, updateIntervalMs);
 
     return () => clearInterval(interval);
