@@ -86,18 +86,39 @@ function computeSensorStatus(input: {
   return "safe";
 }
 
+/** Stable condition identity for one-notification-per-event alerting */
+export type AlertConditionKind = "temperature" | "humidity" | "motion" | "distance";
+
 export interface Alert {
   id: string;
   type: "environmental" | "security";
   severity: "warning" | "critical";
   message: string;
   sensorId: string;
+  /** Which sensor condition this alert event belongs to */
+  conditionKind?: AlertConditionKind;
   timestamp: Date;
   acknowledged: boolean;
   acknowledgedBy?: string;
   acknowledgedAt?: Date;
   escalated: boolean;
   escalatedAt?: Date;
+}
+
+function alertEventKey(sensorId: string, conditionKind: AlertConditionKind): string {
+  return `${sensorId}:${conditionKind}`;
+}
+
+/** Infer condition kind for older alerts that predate conditionKind field */
+function inferConditionKind(alert: Pick<Alert, "type" | "message" | "conditionKind">): AlertConditionKind | null {
+  if (alert.conditionKind) return alert.conditionKind;
+  const msg = alert.message || "";
+  if (/high temperature/i.test(msg)) return "temperature";
+  if (/high humidity/i.test(msg)) return "humidity";
+  if (/object at/i.test(msg) || /distance/i.test(msg) || /limit \d+/i.test(msg)) return "distance";
+  if (/proximity|motion|touched/i.test(msg)) return "motion";
+  if (alert.type === "security") return "distance";
+  return null;
 }
 
 export interface LogEntry {
@@ -240,6 +261,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const publishAlertsRef = useRef<(sensorSnapshot: SensorData[]) => Promise<void>>(
     async () => {}
   );
+  /** Keys currently being written — blocks double notify from overlapping RTDB ticks */
+  const publishingAlertKeysRef = useRef<Set<string>>(new Set());
 
   const navigateToAlertsRef = useRef<(() => void) | null>(null);
 
@@ -352,6 +375,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           severity: raw.severity,
           message: raw.message,
           sensorId: raw.sensorId,
+          conditionKind: raw.conditionKind,
           timestamp: toDate(raw.timestamp) || new Date(),
           acknowledged: raw.acknowledged ?? false,
           acknowledgedBy: raw.acknowledgedBy,
@@ -559,93 +583,126 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   // ── 5. Check sensors and generate alerts ──────────────────────
-  const checkSensorsForAlerts = (sensorData: SensorData[]): Omit<Alert, 'id'>[] => {
-    const newAlerts: Omit<Alert, 'id'>[] = [];
+  // One notification per alert *event*:
+  //   condition becomes true → notify once → stay silent until acknowledged
+  //   OR until the condition clears (event ends) → then a new breach can notify again.
+  type AlertCandidate = Omit<Alert, "id"> & { conditionKind: AlertConditionKind };
 
-    let motionAlertCount = 0;
-    const maxMotionAlerts = 2;
+  const collectBreachingConditions = (
+    sensorData: SensorData[]
+  ): { candidates: AlertCandidate[]; activeKeys: Set<string> } => {
+    const candidates: AlertCandidate[] = [];
+    const activeKeys = new Set<string>();
 
-    sensorData.filter(s => !s.archived).forEach((sensor) => {
-      // Temperature alerts
-      if (sensor.temperature > sensor.tempThreshold) {
-        newAlerts.push({
-          type: "environmental",
-          severity: sensor.temperature > sensor.tempThreshold + 2 ? "critical" : "warning",
-          message: `High Temperature: ${sensor.temperature}°C exceeds threshold of ${sensor.tempThreshold}°C at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-      }
+    sensorData
+      .filter((s) => !s.archived)
+      .forEach((sensor) => {
+        if (sensor.temperature > sensor.tempThreshold) {
+          const kind: AlertConditionKind = "temperature";
+          activeKeys.add(alertEventKey(sensor.id, kind));
+          candidates.push({
+            type: "environmental",
+            severity:
+              sensor.temperature > sensor.tempThreshold + 2 ? "critical" : "warning",
+            message: `High Temperature: ${sensor.temperature}°C exceeds threshold of ${sensor.tempThreshold}°C at ${sensor.name}`,
+            sensorId: sensor.id,
+            conditionKind: kind,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+        }
 
-      // Humidity alerts
-      if (sensor.humidity > sensor.humidityThreshold) {
-        newAlerts.push({
-          type: "environmental",
-          severity: sensor.humidity > sensor.humidityThreshold + 10 ? "critical" : "warning",
-          message: `High Humidity: ${sensor.humidity}% exceeds threshold of ${sensor.humidityThreshold}% at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-      }
+        if (sensor.humidity > sensor.humidityThreshold) {
+          const kind: AlertConditionKind = "humidity";
+          activeKeys.add(alertEventKey(sensor.id, kind));
+          candidates.push({
+            type: "environmental",
+            severity:
+              sensor.humidity > sensor.humidityThreshold + 10 ? "critical" : "warning",
+            message: `High Humidity: ${sensor.humidity}% exceeds threshold of ${sensor.humidityThreshold}% at ${sensor.name}`,
+            sensorId: sensor.id,
+            conditionKind: kind,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+        }
 
-      // Motion alerts
-      if (sensor.motionDetected && motionAlertCount < maxMotionAlerts) {
-        newAlerts.push({
-          type: "security",
-          severity: "critical",
-          message: `⚠️ PROXIMITY BREACH: Visitor touched artifact at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-        motionAlertCount++;
-      }
+        if (sensor.motionDetected) {
+          const kind: AlertConditionKind = "motion";
+          activeKeys.add(alertEventKey(sensor.id, kind));
+          candidates.push({
+            type: "security",
+            severity: "critical",
+            message: `⚠️ PROXIMITY BREACH: Visitor touched artifact at ${sensor.name}`,
+            sensorId: sensor.id,
+            conditionKind: kind,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+        }
 
-      // Distance: breach when at or closer than set cm limit
-      const limitCm = sensor.distanceThreshold;
-      const distCm = sensor.distanceCm;
-      if (
-        distCm != null &&
-        distCm <= limitCm &&
-        motionAlertCount < maxMotionAlerts
-      ) {
-        newAlerts.push({
-          type: "security",
-          severity: "critical",
-          message: `⚠️ PROXIMITY BREACH: Object at ${distCm.toFixed(1)} cm (limit ${limitCm.toFixed(0)} cm) at ${sensor.name}`,
-          sensorId: sensor.id,
-          timestamp: new Date(),
-          acknowledged: false,
-          escalated: false,
-        });
-        motionAlertCount++;
-      }
-    });
+        // Distance breach: object at or closer than the configured cm limit
+        const limitCm = sensor.distanceThreshold;
+        const distCm = sensor.distanceCm;
+        if (distCm != null && distCm <= limitCm) {
+          const kind: AlertConditionKind = "distance";
+          activeKeys.add(alertEventKey(sensor.id, kind));
+          candidates.push({
+            type: "security",
+            severity: "critical",
+            message: `⚠️ PROXIMITY BREACH: Object at ${distCm.toFixed(1)} cm (limit ${limitCm.toFixed(0)} cm) at ${sensor.name}`,
+            sensorId: sensor.id,
+            conditionKind: kind,
+            timestamp: new Date(),
+            acknowledged: false,
+            escalated: false,
+          });
+        }
+      });
 
-    return newAlerts;
+    return { candidates, activeKeys };
   };
 
   const publishAlerts = async (sensorSnapshot: SensorData[]) => {
-    const candidates = checkSensorsForAlerts(sensorSnapshot);
-    if (candidates.length === 0) return;
+    const { candidates, activeKeys } = collectBreachingConditions(sensorSnapshot);
 
-    const recentAlertKeys = new Set(
-      alertsRef.current
-        .filter((a) => Date.now() - a.timestamp.getTime() < 60000)
-        .map((a) => `${a.sensorId}-${a.type}-${a.message.slice(0, 24)}`)
-    );
+    // Open events = unacknowledged alerts whose condition is STILL true.
+    // If the condition cleared, that event ended (even if never acknowledged).
+    const openEventKeys = new Set<string>();
+    for (const existing of alertsRef.current) {
+      if (existing.acknowledged) continue;
+      const kind = inferConditionKind(existing);
+      if (!kind) continue;
+      const key = alertEventKey(existing.sensorId, kind);
+      if (activeKeys.has(key)) {
+        openEventKeys.add(key);
+      }
+    }
 
-    const uniqueNewAlerts = candidates.filter((alert) => {
-      const key = `${alert.sensorId}-${alert.type}-${alert.message.slice(0, 24)}`;
-      return !recentAlertKeys.has(key);
+    // Drop stale in-flight locks (condition cleared, or already stored as open)
+    for (const key of [...publishingAlertKeysRef.current]) {
+      if (!activeKeys.has(key) || openEventKeys.has(key)) {
+        publishingAlertKeysRef.current.delete(key);
+      }
+    }
+
+    // Only notify for breaches that do not already have an open (unacked) event
+    const toPublish = candidates.filter((alert) => {
+      const key = alertEventKey(alert.sensorId, alert.conditionKind);
+      return !openEventKeys.has(key) && !publishingAlertKeysRef.current.has(key);
     });
 
-    for (const alert of uniqueNewAlerts) {
+    if (toPublish.length === 0) return;
+
+    for (const alert of toPublish) {
+      const key = alertEventKey(alert.sensorId, alert.conditionKind);
+      // Lock immediately so concurrent RTDB ticks don't double-fire
+      publishingAlertKeysRef.current.add(key);
+      openEventKeys.add(key);
+
       try {
         const alertRef = await addDoc(collection(db, "alerts"), {
           ...alert,
@@ -686,6 +743,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
             sensorSnapshot.find((s) => s.id === alert.sensorId)?.motionDetected || false,
         });
       } catch (err) {
+        // Allow retry on next tick if write failed
+        publishingAlertKeysRef.current.delete(key);
+        openEventKeys.delete(key);
         console.error("[ALERT] Failed to publish alert:", err);
       }
     }
@@ -830,6 +890,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         acknowledgedBy: acknowledgedBy || 'System',
         acknowledgedAt: Timestamp.now(),
       });
+      // Acknowledging ends the notification hold for that event.
+      // If the condition is still true, the next publishAlerts pass may send a new notification.
       toast.success("Alert acknowledged");
     } catch (error) {
       console.error("Error acknowledging alert:", error);
