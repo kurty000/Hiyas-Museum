@@ -45,11 +45,13 @@ function computeSensorStatus(input: {
     distanceThreshold,
   } = input;
 
+  // ESP uses 999 as timeout/error sentinel — ignore invalid readings
   const distanceLimitCm = distanceThreshold * 100;
-  const tooClose =
+  const validDistance =
     distanceCm != null &&
     distanceCm >= 0 &&
-    distanceCm <= distanceLimitCm;
+    distanceCm < 900;
+  const tooClose = validDistance && distanceCm! <= distanceLimitCm;
 
   // Security / proximity → critical
   if (motionDetected || tooClose) return "critical";
@@ -628,17 +630,18 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         motionAlertCount++;
       }
 
-      // Distance / proximity threshold (ESP distanceCm vs website meters setting)
-      const limitCm = sensor.distanceThreshold * 100;
-      const tooClose =
-        sensor.distanceCm != null &&
-        sensor.distanceCm >= 0 &&
-        sensor.distanceCm <= limitCm;
+      // Distance / proximity (ESP cm vs website meters setting)
+      const limitM = sensor.distanceThreshold;
+      const distM =
+        sensor.distanceCm != null && sensor.distanceCm >= 0 && sensor.distanceCm < 900
+          ? sensor.distanceCm / 100
+          : null;
+      const tooClose = distM != null && distM <= limitM;
       if (tooClose && motionAlertCount < maxMotionAlerts) {
         newAlerts.push({
           type: "security",
           severity: "critical",
-          message: `⚠️ PROXIMITY BREACH: Object at ${sensor.distanceCm!.toFixed(1)} cm (limit ${limitCm.toFixed(0)} cm) at ${sensor.name}`,
+          message: `⚠️ PROXIMITY BREACH: Object at ${distM!.toFixed(2)} m (limit ${limitM.toFixed(1)} m) at ${sensor.name}`,
           sensorId: sensor.id,
           timestamp: new Date(),
           acknowledged: false,
