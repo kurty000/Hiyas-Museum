@@ -324,6 +324,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const liveReadingsRef = useRef<Record<string, Partial<SensorData>>>({});
   /** Last communication time (ms) per registered hardware sensor — kept after RTDB drop */
   const lastSeenAtRef = useRef<Record<string, number>>({});
+  /** Wait for first RTDB snapshot before marking Offline (avoids false alerts on load) */
+  const rtdbReadyRef = useRef(false);
   /** Sensors deleted by admin — ignore ESP/RTDB recreate until removed from this set */
   const deletedSensorIdsRef = useRef<Set<string>>(new Set());
   /** Latest sensors snapshot for threshold lookup during RTDB sync */
@@ -396,6 +398,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
    * Reconnect (fresh lastSeen) restores the mergeLive status on the next pass.
    */
   const applyOfflineStatus = (sensorList: SensorData[]): SensorData[] => {
+    // Until RTDB has reported once, keep Firestore statuses (no false Offline flash)
+    if (!rtdbReadyRef.current) return sensorList;
+
     const timeoutMs =
       normalizeOfflineTimeoutSeconds(
         settingsRef.current.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
@@ -412,17 +417,18 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
       if (!monitored) return sensor;
 
-      const lastSeen =
-        lastSeenAtRef.current[sensor.id] ?? sensor.lastUpdated.getTime();
-      if (lastSeenAtRef.current[sensor.id] == null) {
-        lastSeenAtRef.current[sensor.id] = lastSeen;
+      const lastSeen = lastSeenAtRef.current[sensor.id];
+      // No communication timestamp yet — give a grace window from first monitor moment
+      if (lastSeen == null) {
+        lastSeenAtRef.current[sensor.id] = now;
+        return sensor.status === "offline" ? { ...sensor, status: "safe" } : sensor;
       }
 
       if (now - lastSeen > timeoutMs) {
         return sensor.status === "offline" ? sensor : { ...sensor, status: "offline" };
       }
 
-      // Within timeout but no live cache (brief disconnect) — keep last non-offline status
+      // Within timeout but no live cache (brief disconnect) — clear Offline if still in grace
       if (!liveReadingsRef.current[sensor.id] && sensor.status === "offline") {
         return { ...sensor, status: "safe" };
       }
@@ -506,15 +512,6 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
           hardware: Boolean(raw.hardware || raw.source === "esp32"),
         });
       });
-      for (const sensor of data) {
-        if (
-          sensor.hardware &&
-          lastSeenAtRef.current[sensor.id] == null &&
-          sensor.lastUpdated
-        ) {
-          lastSeenAtRef.current[sensor.id] = sensor.lastUpdated.getTime();
-        }
-      }
       setSensors((prev) => {
         const next = refreshSensorConnectivity(data);
         commitConnectivityUpdate(next, prev);
@@ -732,6 +729,20 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         }
 
         liveHardwareIdsRef.current = ids;
+
+        // First RTDB pass: start grace clocks for registered hardware missing from RTDB
+        if (!rtdbReadyRef.current) {
+          const now = Date.now();
+          for (const sensor of sensorsRef.current) {
+            if (sensor.archived) continue;
+            if (!sensor.hardware && !ids.has(sensor.id)) continue;
+            if (lastSeenAtRef.current[sensor.id] != null) continue;
+            // Absent from live snapshot → begin offline timeout from now (not old Firestore time)
+            lastSeenAtRef.current[sensor.id] = now;
+          }
+          rtdbReadyRef.current = true;
+        }
+
         setDetectedDevices(
           detected.sort((a, b) => a.deviceId.localeCompare(b.deviceId))
         );
