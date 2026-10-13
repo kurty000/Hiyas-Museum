@@ -409,9 +409,10 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   /**
-   * Registered hardware → Offline when last ESP heartbeat/reading is older than timeout.
-   * Mere presence in RTDB is not enough (a dead ESP can leave a stale node behind).
-   * ESP should send a changing `heartbeat` (or epoch `updatedAt`) on every PUT.
+   * Registered hardware → Offline when they leave RTDB and stay gone past timeout.
+   * Presence in /liveSensors always wins: a device currently in RTDB stays Online even if
+   * readings are stable or the ESP wall-clock is stale. Heartbeat/seq still refreshes
+   * lastSeen so the timeout starts cleanly once the node disappears.
    */
   const applyOfflineStatus = (sensorList: SensorData[]): SensorData[] => {
     // Until RTDB has reported once, keep Firestore statuses (no false Offline flash)
@@ -434,6 +435,16 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
       if (!monitored) return sensor;
 
+      // Still present in RTDB → Online. Refresh lastSeen so the offline clock only
+      // starts once the device disappears from the live snapshot.
+      if (currentlyLive) {
+        lastSeenAtRef.current[sensor.id] = now;
+        if (sensor.status === "offline") {
+          return { ...sensor, status: "safe" };
+        }
+        return sensor;
+      }
+
       const lastSeen = lastSeenAtRef.current[sensor.id];
       // No communication timestamp yet — give a grace window from first monitor moment
       if (lastSeen == null) {
@@ -445,8 +456,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         return sensor.status === "offline" ? sensor : { ...sensor, status: "offline" };
       }
 
-      // Fresh heartbeat within timeout: clear Offline (mergeLive already set real status
-      // when live readings exist; otherwise show safe until the next reading).
+      // Within timeout after leaving RTDB — clear Offline while still in grace
       if (sensor.status === "offline") {
         return { ...sensor, status: "safe" };
       }
@@ -693,6 +703,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
               espTs >= wallNow - Math.max(timeoutMs, 60_000);
             // Bump last-seen on fresh epoch ts, changing heartbeat/seq, or reading change.
             // Unchanged siblings keep prior lastSeen (parent onValue re-delivers the tree).
+            // applyOfflineStatus also treats current RTDB presence as Online.
             const seenAt = espTsFresh
               ? espTs
               : heartbeatChanged || readingChanged
