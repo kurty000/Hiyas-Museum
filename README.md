@@ -5,7 +5,7 @@ An interactive and real-time IoT dashboard designed for the Hiyas Museum. This s
 ## What the System Does
 - **Real-Time Monitoring:** Tracks environmental metrics (temperature, humidity, etc.) critical for artifact preservation using IoT sensors.
 - **Detected → Register flow:** New ESP32 devices that write to Realtime Database `liveSensors/` appear under **Detected Devices**. Staff must click **Add Sensor**, configure name/location/thresholds, and save before the device is monitored. Devices are never auto-registered.
-- **Offline detection:** After a sensor is registered, the dashboard watches last communication time. If the device stops sending data past the configured offline timeout, status becomes **Offline** and one notification is sent for that offline stretch. Reconnect clears the event so a later disconnect can notify again.
+- **Offline detection:** After a sensor is registered, the dashboard watches last communication time. If the device stops sending data for **60 seconds**, status becomes **Offline** and one notification is sent for that offline stretch. Reconnect clears the event so a later disconnect can notify again.
 - **Visitor Analytics:** Displays visitor counts, engagement statistics, and foot traffic.
 - **Exhibit Management:** Allows staff to manage and monitor the status of various interactive and connected exhibits.
 - **Data Visualization:** Presents complex sensor data through intuitive charts and graphs for quick decision-making.
