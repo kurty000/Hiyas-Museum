@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMuseum } from "../context/MuseumContext";
 import { useAuth } from "../context/AuthContext";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
@@ -38,15 +38,8 @@ export default function Sensors() {
     updateSensorSettings,
     registerDetectedSensor,
     settings,
-    updateSettings,
   } = useMuseum();
   const { isAdmin } = useAuth();
-  const offlineTimeoutSeconds = settings.offlineTimeoutSeconds ?? 60;
-  const [offlineTimeoutDraft, setOfflineTimeoutDraft] = useState(offlineTimeoutSeconds);
-
-  useEffect(() => {
-    setOfflineTimeoutDraft(offlineTimeoutSeconds);
-  }, [offlineTimeoutSeconds]);
   const [editingSensor, setEditingSensor] = useState<string | null>(null);
   const [tempSettings, setTempSettings] = useState<{
     tempThreshold: number;
@@ -162,35 +155,14 @@ export default function Sensors() {
   return (
     <div className="space-y-8">
       {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">Sensor Monitoring</h1>
           <p className="text-gray-600 mt-1">
             Detected hardware must be registered before monitoring. Registered sensors go Offline
-            after {offlineTimeoutSeconds}s without data.
+            after 60s without data.
           </p>
         </div>
-        {isAdmin && (
-          <div className="w-full sm:w-56 space-y-2 shrink-0">
-            <Label htmlFor="offline-timeout" className="text-sm text-gray-700">
-              Offline timeout: {offlineTimeoutDraft}s
-            </Label>
-            <Slider
-              id="offline-timeout"
-              min={15}
-              max={300}
-              step={5}
-              value={[offlineTimeoutDraft]}
-              onValueChange={([v]) => setOfflineTimeoutDraft(v)}
-              onValueCommit={([v]) =>
-                updateSettings({
-                  ...settings,
-                  offlineTimeoutSeconds: v,
-                })
-              }
-            />
-          </div>
-        )}
 
         {/* Save Threshold Confirmation Dialog */}
         <AlertDialog open={confirmSaveDialogOpen} onOpenChange={setConfirmSaveDialogOpen}>

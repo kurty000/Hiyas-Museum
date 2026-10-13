@@ -362,9 +362,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   useEffect(() => {
     settingsRef.current = {
       ...settings,
-      offlineTimeoutSeconds: normalizeOfflineTimeoutSeconds(
-        settings.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
-      ),
+      // Offline timeout is fixed at 60s (not user-configurable)
+      offlineTimeoutSeconds: DEFAULT_OFFLINE_TIMEOUT_SECONDS,
     };
   }, [settings]);
 
@@ -417,10 +416,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     // Until RTDB has reported once, keep Firestore statuses (no false Offline flash)
     if (!rtdbReadyRef.current) return sensorList;
 
-    const timeoutMs =
-      normalizeOfflineTimeoutSeconds(
-        settingsRef.current.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
-      ) * 1000;
+    const timeoutMs = DEFAULT_OFFLINE_TIMEOUT_SECONDS * 1000;
     const now = Date.now();
 
     return sensorList.map((sensor) => {
@@ -603,9 +599,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         setSettings({
           ...DEFAULT_SETTINGS,
           ...rawSettings,
-          offlineTimeoutSeconds: normalizeOfflineTimeoutSeconds(
-            rawSettings.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
-          ),
+          offlineTimeoutSeconds: DEFAULT_OFFLINE_TIMEOUT_SECONDS,
         });
       }
     });
@@ -681,10 +675,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
               !prevLive ||
               readingFingerprint(prevLive) !== readingFingerprint(nextPartial);
             const wallNow = Date.now();
-            const timeoutMs =
-              normalizeOfflineTimeoutSeconds(
-                settingsRef.current.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
-              ) * 1000;
+            const timeoutMs = DEFAULT_OFFLINE_TIMEOUT_SECONDS * 1000;
             // Prefer a plausible wall-clock ts; ignore stale/future clocks.
             const espTsFresh =
               espTs != null &&
@@ -826,7 +817,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     const interval = setInterval(tick, OFFLINE_CHECK_INTERVAL_MS);
     tick();
     return () => clearInterval(interval);
-  }, [seeded, settings.offlineTimeoutSeconds]);
+  }, [seeded]);
 
   // ── 3. Automated Dispatch Simulation (unchanged logic) ────────
   const dispatchAlert = (alert: Alert) => {
@@ -875,9 +866,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         if (sensor.status === "offline") {
           const kind: AlertConditionKind = "offline";
           activeKeys.add(alertEventKey(sensor.id, kind));
-          const timeoutSec = normalizeOfflineTimeoutSeconds(
-            settingsRef.current.offlineTimeoutSeconds
-          );
+          const timeoutSec = DEFAULT_OFFLINE_TIMEOUT_SECONDS;
           candidates.push({
             type: "environmental",
             severity: "warning",
@@ -1148,9 +1137,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     try {
       const payload: SystemSettings = {
         ...newSettings,
-        offlineTimeoutSeconds: normalizeOfflineTimeoutSeconds(
-          newSettings.offlineTimeoutSeconds
-        ),
+        offlineTimeoutSeconds: DEFAULT_OFFLINE_TIMEOUT_SECONDS,
       };
       await setDoc(doc(db, "settings", "global"), payload);
       toast.success("Settings updated successfully");
