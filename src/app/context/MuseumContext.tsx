@@ -394,8 +394,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   /**
-   * Registered hardware sensors → Offline when last communication exceeds timeout.
-   * Reconnect (fresh lastSeen) restores the mergeLive status on the next pass.
+   * Registered hardware sensors → Offline when they leave RTDB and stay gone past timeout.
+   * Presence in /liveSensors always wins: a device currently in RTDB stays Online even if
+   * readings are stable or the ESP timestamp is stale/wrong.
    */
   const applyOfflineStatus = (sensorList: SensorData[]): SensorData[] => {
     // Until RTDB has reported once, keep Firestore statuses (no false Offline flash)
@@ -410,12 +411,23 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     return sensorList.map((sensor) => {
       if (sensor.archived) return sensor;
 
+      const currentlyLive = liveHardwareIdsRef.current.has(sensor.id);
       const monitored =
         Boolean(sensor.hardware) ||
         lastSeenAtRef.current[sensor.id] != null ||
-        liveHardwareIdsRef.current.has(sensor.id);
+        currentlyLive;
 
       if (!monitored) return sensor;
+
+      // Still present in RTDB → Online. Refresh lastSeen so the offline clock only
+      // starts once the device disappears from the live snapshot.
+      if (currentlyLive) {
+        lastSeenAtRef.current[sensor.id] = now;
+        if (sensor.status === "offline") {
+          return { ...sensor, status: "safe" };
+        }
+        return sensor;
+      }
 
       const lastSeen = lastSeenAtRef.current[sensor.id];
       // No communication timestamp yet — give a grace window from first monitor moment
@@ -656,11 +668,25 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
             const changed =
               !prevLive ||
               readingFingerprint(prevLive) !== readingFingerprint(nextPartial);
-            // Only bump last-seen when ESP sends a timestamp or readings change.
-            // Parent onValue can re-deliver unchanged siblings when another device updates.
-            const seenAt =
-              espTs ??
-              (changed ? Date.now() : lastSeenAtRef.current[deviceId] ?? Date.now());
+            const wallNow = Date.now();
+            const timeoutMs =
+              normalizeOfflineTimeoutSeconds(
+                settingsRef.current.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
+              ) * 1000;
+            // Prefer a plausible ESP heartbeat; ignore stale/future clocks that would
+            // freeze lastSeen and falsely mark Online devices Offline.
+            const espTsFresh =
+              espTs != null &&
+              espTs <= wallNow + 60_000 &&
+              espTs >= wallNow - Math.max(timeoutMs, 60_000);
+            // Bump last-seen on fresh heartbeat or reading change. Unchanged siblings
+            // keep their prior lastSeen (parent onValue re-delivers the whole tree).
+            // Presence-based Online (applyOfflineStatus) covers stable live devices.
+            const seenAt = espTsFresh
+              ? espTs
+              : changed
+                ? wallNow
+                : lastSeenAtRef.current[deviceId] ?? wallNow;
             const lastUpdated = new Date(seenAt);
 
             const livePartial: Partial<SensorData> = {
