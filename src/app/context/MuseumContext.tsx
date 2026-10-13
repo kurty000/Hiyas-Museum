@@ -409,10 +409,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   /**
-   * Registered hardware → Offline when they leave RTDB and stay gone past timeout.
-   * Presence in /liveSensors always wins: a device currently in RTDB stays Online even if
-   * readings are stable or the ESP wall-clock is stale. Heartbeat/seq still refreshes
-   * lastSeen so the timeout starts cleanly once the node disappears.
+   * Registered hardware → Offline when last ESP heartbeat/reading is older than timeout.
+   * Do not treat mere RTDB presence as Online (a dead ESP can leave a stale node).
+   * ESP should send a changing `heartbeat` on every PUT (see esp32/hiyas_museum_sensor.ino).
    */
   const applyOfflineStatus = (sensorList: SensorData[]): SensorData[] => {
     // Until RTDB has reported once, keep Firestore statuses (no false Offline flash)
@@ -435,16 +434,6 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
       if (!monitored) return sensor;
 
-      // Still present in RTDB → Online. Refresh lastSeen so the offline clock only
-      // starts once the device disappears from the live snapshot.
-      if (currentlyLive) {
-        lastSeenAtRef.current[sensor.id] = now;
-        if (sensor.status === "offline") {
-          return { ...sensor, status: "safe" };
-        }
-        return sensor;
-      }
-
       const lastSeen = lastSeenAtRef.current[sensor.id];
       // No communication timestamp yet — give a grace window from first monitor moment
       if (lastSeen == null) {
@@ -456,7 +445,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         return sensor.status === "offline" ? sensor : { ...sensor, status: "offline" };
       }
 
-      // Within timeout after leaving RTDB — clear Offline while still in grace
+      // Fresh heartbeat within timeout — clear Offline (mergeLive sets real status when live)
       if (sensor.status === "offline") {
         return { ...sensor, status: "safe" };
       }
