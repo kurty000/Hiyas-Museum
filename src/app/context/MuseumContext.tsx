@@ -116,19 +116,32 @@ export type AlertConditionKind = "temperature" | "humidity" | "motion" | "distan
 const DEFAULT_OFFLINE_TIMEOUT_SECONDS = 60;
 const OFFLINE_CHECK_INTERVAL_MS = 5_000;
 
-/** Prefer ESP heartbeat timestamp; supports seconds or milliseconds. */
+/**
+ * Wall-clock timestamp from ESP (epoch ms).
+ * Ignores small numbers like Arduino millis()-since-boot (those are heartbeats, not dates).
+ */
 function extractEspTimestampMs(raw: Record<string, unknown>): number | null {
   const t = raw.updatedAt ?? raw.timestamp ?? raw.ts ?? raw.time ?? raw.lastUpdated;
   if (t == null || t === "") return null;
   if (typeof t === "number" && !Number.isNaN(t)) {
-    return t < 1e12 ? t * 1000 : t;
+    if (t > 1e12) return t; // epoch milliseconds
+    if (t > 1e9) return t * 1000; // epoch seconds
+    return null; // e.g. millis() since boot — not a wall clock
   }
   if (typeof t === "object" && t !== null && "seconds" in t) {
     const seconds = Number((t as { seconds: number }).seconds);
-    if (!Number.isNaN(seconds)) return seconds * 1000;
+    if (!Number.isNaN(seconds) && seconds > 1e9) return seconds * 1000;
   }
   const parsed = new Date(String(t)).getTime();
-  return Number.isNaN(parsed) ? null : parsed;
+  return Number.isNaN(parsed) || parsed < 1e12 ? null : parsed;
+}
+
+/** Changing token so each ESP PUT refreshes last-seen even when readings are unchanged. */
+function extractHeartbeatToken(raw: Record<string, unknown>): string | null {
+  const t =
+    raw.heartbeat ?? raw.seq ?? raw.updatedAt ?? raw.timestamp ?? raw.ts ?? raw.time;
+  if (t == null || t === "") return null;
+  return String(t);
 }
 
 function readingFingerprint(partial: {
@@ -324,6 +337,8 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   const liveReadingsRef = useRef<Record<string, Partial<SensorData>>>({});
   /** Last communication time (ms) per registered hardware sensor — kept after RTDB drop */
   const lastSeenAtRef = useRef<Record<string, number>>({});
+  /** Last ESP heartbeat/seq/updatedAt token — detects PUTs when readings are unchanged */
+  const lastHeartbeatRef = useRef<Record<string, string>>({});
   /** Wait for first RTDB snapshot before marking Offline (avoids false alerts on load) */
   const rtdbReadyRef = useRef(false);
   /** Sensors deleted by admin — ignore ESP/RTDB recreate until removed from this set */
@@ -394,9 +409,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   };
 
   /**
-   * Registered hardware sensors → Offline when they leave RTDB and stay gone past timeout.
-   * Presence in /liveSensors always wins: a device currently in RTDB stays Online even if
-   * readings are stable or the ESP timestamp is stale/wrong.
+   * Registered hardware → Offline when last ESP heartbeat/reading is older than timeout.
+   * Mere presence in RTDB is not enough (a dead ESP can leave a stale node behind).
+   * ESP should send a changing `heartbeat` (or epoch `updatedAt`) on every PUT.
    */
   const applyOfflineStatus = (sensorList: SensorData[]): SensorData[] => {
     // Until RTDB has reported once, keep Firestore statuses (no false Offline flash)
@@ -419,16 +434,6 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
       if (!monitored) return sensor;
 
-      // Still present in RTDB → Online. Refresh lastSeen so the offline clock only
-      // starts once the device disappears from the live snapshot.
-      if (currentlyLive) {
-        lastSeenAtRef.current[sensor.id] = now;
-        if (sensor.status === "offline") {
-          return { ...sensor, status: "safe" };
-        }
-        return sensor;
-      }
-
       const lastSeen = lastSeenAtRef.current[sensor.id];
       // No communication timestamp yet — give a grace window from first monitor moment
       if (lastSeen == null) {
@@ -440,8 +445,9 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         return sensor.status === "offline" ? sensor : { ...sensor, status: "offline" };
       }
 
-      // Within timeout but no live cache (brief disconnect) — clear Offline if still in grace
-      if (!liveReadingsRef.current[sensor.id] && sensor.status === "offline") {
+      // Fresh heartbeat within timeout: clear Offline (mergeLive already set real status
+      // when live readings exist; otherwise show safe until the next reading).
+      if (sensor.status === "offline") {
         return { ...sensor, status: "safe" };
       }
 
@@ -664,8 +670,15 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
               motionDetected,
               distanceCm,
             };
-            const espTs = extractEspTimestampMs(raw as Record<string, unknown>);
-            const changed =
+            const rawObj = raw as Record<string, unknown>;
+            const espTs = extractEspTimestampMs(rawObj);
+            const heartbeat = extractHeartbeatToken(rawObj);
+            const heartbeatChanged =
+              heartbeat != null && lastHeartbeatRef.current[deviceId] !== heartbeat;
+            if (heartbeat != null) {
+              lastHeartbeatRef.current[deviceId] = heartbeat;
+            }
+            const readingChanged =
               !prevLive ||
               readingFingerprint(prevLive) !== readingFingerprint(nextPartial);
             const wallNow = Date.now();
@@ -673,18 +686,16 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
               normalizeOfflineTimeoutSeconds(
                 settingsRef.current.offlineTimeoutSeconds ?? DEFAULT_OFFLINE_TIMEOUT_SECONDS
               ) * 1000;
-            // Prefer a plausible ESP heartbeat; ignore stale/future clocks that would
-            // freeze lastSeen and falsely mark Online devices Offline.
+            // Prefer a plausible wall-clock ts; ignore stale/future clocks.
             const espTsFresh =
               espTs != null &&
               espTs <= wallNow + 60_000 &&
               espTs >= wallNow - Math.max(timeoutMs, 60_000);
-            // Bump last-seen on fresh heartbeat or reading change. Unchanged siblings
-            // keep their prior lastSeen (parent onValue re-delivers the whole tree).
-            // Presence-based Online (applyOfflineStatus) covers stable live devices.
+            // Bump last-seen on fresh epoch ts, changing heartbeat/seq, or reading change.
+            // Unchanged siblings keep prior lastSeen (parent onValue re-delivers the tree).
             const seenAt = espTsFresh
               ? espTs
-              : changed
+              : heartbeatChanged || readingChanged
                 ? wallNow
                 : lastSeenAtRef.current[deviceId] ?? wallNow;
             const lastUpdated = new Date(seenAt);
@@ -751,7 +762,10 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
 
         // Drop live cache for devices that disappeared from RTDB (keep lastSeenAt for timeout)
         for (const id of Object.keys(liveReadingsRef.current)) {
-          if (!ids.has(id)) delete liveReadingsRef.current[id];
+          if (!ids.has(id)) {
+            delete liveReadingsRef.current[id];
+            delete lastHeartbeatRef.current[id];
+          }
         }
 
         liveHardwareIdsRef.current = ids;
@@ -1206,6 +1220,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       delete liveReadingsRef.current[sensorId];
       liveHardwareIdsRef.current.delete(sensorId);
       delete lastSeenAtRef.current[sensorId];
+      delete lastHeartbeatRef.current[sensorId];
       delete liveReadingsRef.current[sensorId];
       setSensors((prev) => prev.filter((s) => s.id !== sensorId));
 
