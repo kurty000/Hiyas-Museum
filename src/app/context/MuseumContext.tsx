@@ -267,12 +267,6 @@ const DEFAULT_SETTINGS: SystemSettings = {
   mqttTopic: "museum/sensors/+",
 };
 
-function normalizeOfflineTimeoutSeconds(raw: unknown): number {
-  const n = Number(raw);
-  if (Number.isNaN(n)) return DEFAULT_OFFLINE_TIMEOUT_SECONDS;
-  return Math.min(3600, Math.max(15, Math.round(n)));
-}
-
 // ── Firestore Helpers ──────────────────────────────────────────────
 // Convert Firestore timestamps to JS Dates when reading a document
 const toDate = (val: any): Date | undefined => {
