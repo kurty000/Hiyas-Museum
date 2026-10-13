@@ -2,11 +2,18 @@
  * Hiyas Museum — ESP32 sensor node
  *
  * Writes to Firebase RTDB: /liveSensors/{DEVICE_ID}
- * Website rule: DEVICE_ID must match the registered sensor document id.
+ * Website rule: DEVICE_ID must match the registered Firestore sensor document id.
  *
  * IMPORTANT: send a changing "heartbeat" on every PUT so the dashboard
  * can refresh last-seen even when temperature/humidity stay the same.
- * Without heartbeat, stable readings look "dead" after the offline timeout.
+ * Without heartbeat, stable readings look "dead" / Offline after the timeout
+ * because identical RTDB payloads do not notify website listeners.
+ *
+ * Serial Monitor: set baud to 115200.
+ * Firebase HTTP codes printed as "Firebase: <code>":
+ *   200       = OK — write accepted
+ *   401 / 403 = Permission denied — check database.rules.json / path / JSON shape
+ *   -1        = Connection failed — WiFi, TLS, DNS, or host URL
  */
 
 #include <WiFi.h>
@@ -17,7 +24,7 @@
 const char* WIFI_SSID     = "Free_Wifi";
 const char* WIFI_PASSWORD = "P@ssw0rd2026";
 
-// Must match the registered sensor id on the website
+// Must match the registered sensor id on the website exactly
 const char* DEVICE_ID   = "esp32_gallery_a_1";
 const char* DEVICE_NAME = "Gallery A - Artifact 1";
 const char* LOCATION    = "Gallery A";
@@ -64,11 +71,18 @@ bool putFirebase(String json) {
   HTTPClient http;
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
+
   int code = http.PUT(json);
+  String body = http.getString();
   http.end();
 
   Serial.print("Firebase: ");
   Serial.println(code);
+  // 200 OK | 401/403 rules denied | -1 connection/TLS/DNS failure
+  if (code < 200 || code >= 300) {
+    Serial.print("Firebase body: ");
+    Serial.println(body);
+  }
   return code >= 200 && code < 300;
 }
 
@@ -81,6 +95,7 @@ void connectWiFi() {
     Serial.print(".");
   }
   Serial.println();
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
 }
 
@@ -97,12 +112,15 @@ float readDistanceCm() {
 }
 
 void setup() {
-  Serial.begin(19200);
+  Serial.begin(115200);
   pinMode(PIR_PIN, INPUT);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   dht.begin();
   connectWiFi();
+  Serial.println("Hiyas Museum ESP ready");
+  Serial.print("DEVICE_ID=");
+  Serial.println(DEVICE_ID);
   delay(2000);
 }
 
@@ -129,6 +147,8 @@ void loop() {
 
     float dist = distance < 0 ? 999 : distance;
     putFirebase(buildJson(temperature, humidity, motion, dist, status));
+  } else if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("DHT read failed — skip PUT (need temperature+humidity for RTDB rules)");
   }
 
   Serial.println("==============================");

@@ -692,7 +692,7 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
               espTs >= wallNow - Math.max(timeoutMs, 60_000);
             // Bump last-seen on fresh epoch ts, changing heartbeat/seq, or reading change.
             // Unchanged siblings keep prior lastSeen (parent onValue re-delivers the tree).
-            // applyOfflineStatus also treats current RTDB presence as Online.
+            // ESP must send a changing heartbeat — identical PUTs do not notify listeners.
             const seenAt = espTsFresh
               ? espTs
               : heartbeatChanged || readingChanged
