@@ -35,15 +35,15 @@ const navigation = [
 
 export default function Layout() {
   const navigate = useNavigate();
-  const { user, logout, isAdmin } = useAuth();
+  const { user, logout, isAdmin, loading } = useAuth();
   const { setNavigateToAlerts } = useMuseum();
 
-  // Redirect to login if not authenticated
+  // Redirect to login only after auth has settled — never kick out during restore
   useEffect(() => {
-    if (!user) {
+    if (!loading && !user) {
       navigate("/");
     }
-  }, [user, navigate]);
+  }, [user, loading, navigate]);
 
   // Set up navigation callback for alerts
   useEffect(() => {
@@ -51,9 +51,13 @@ export default function Layout() {
   }, [navigate, setNavigateToAlerts]);
 
   const handleLogout = () => {
-    logout();
+    void logout();
     navigate("/");
   };
+
+  if (loading && !user) {
+    return null;
+  }
 
   if (!user) {
     return null;

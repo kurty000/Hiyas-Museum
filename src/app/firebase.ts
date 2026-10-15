@@ -1,5 +1,10 @@
-import { initializeApp } from "firebase/app";
-import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
+import { initializeApp, getApps } from "firebase/app";
+import {
+  initializeAuth,
+  getAuth,
+  indexedDBLocalPersistence,
+  browserLocalPersistence,
+} from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getDatabase } from "firebase/database";
 
@@ -14,13 +19,24 @@ export const firebaseConfig = {
   appId: "1:204039084611:web:7d920f6436e03c8a6192f6",
 };
 
-const app = initializeApp(firebaseConfig);
+const app = getApps().length ? getApps()[0]! : initializeApp(firebaseConfig);
 
-export const auth = getAuth(app);
-// Keep admin signed in across tab switches / browser restarts
-void setPersistence(auth, browserLocalPersistence).catch((err) => {
-  console.warn("[AUTH] Could not set local persistence:", err);
-});
+/**
+ * Persist sessions in IndexedDB (preferred) with localStorage fallback.
+ * initializeAuth is synchronous so persistence is set before any auth listeners run.
+ */
+function createAuth() {
+  try {
+    return initializeAuth(app, {
+      persistence: [indexedDBLocalPersistence, browserLocalPersistence],
+    });
+  } catch {
+    // Hot reload / second import — Auth already initialized for this app
+    return getAuth(app);
+  }
+}
+
+export const auth = createAuth();
 export const db = getFirestore(app);
 /** Realtime Database — ESP32 writes live readings to /liveSensors/{deviceId} */
 export const rtdb = getDatabase(app);

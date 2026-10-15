@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
 import { initializeApp, deleteApp } from 'firebase/app';
 import {
   signInWithEmailAndPassword,
@@ -57,30 +57,77 @@ function normalizeRole(value: unknown): 'admin' | 'curator' {
   return String(value || '').trim().toLowerCase() === 'admin' ? 'admin' : 'curator';
 }
 
+/** Mirror signed-in profile so UI survives remounts / brief Firebase null glitches. */
+const CACHED_USER_KEY = 'hiyas.auth.cachedUser';
+
+function readCachedUser(): User | null {
+  try {
+    const raw = localStorage.getItem(CACHED_USER_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<User>;
+    if (!parsed || typeof parsed.username !== 'string') return null;
+    return {
+      username: parsed.username,
+      role: normalizeRole(parsed.role),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedUser(user: User | null) {
+  try {
+    if (user) {
+      localStorage.setItem(CACHED_USER_KEY, JSON.stringify(user));
+    } else {
+      localStorage.removeItem(CACHED_USER_KEY);
+    }
+  } catch {
+    /* private mode / storage blocked — ignore */
+  }
+}
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const MAX_FAILED_ATTEMPTS = 3;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+/** Ignore brief null auth events (tab restore / token refresh races). */
+const AUTH_NULL_GRACE_MS = 1500;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => readCachedUser());
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => readCachedUser() === null);
+  const intentionalSignOutRef = useRef(false);
+  const nullAuthTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const userRef = useRef<User | null>(user);
+  userRef.current = user;
+
+  const applyUser = (next: User | null) => {
+    setUser(next);
+    writeCachedUser(next);
+  };
 
   // --- Firebase Auth Listener ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (nullAuthTimerRef.current) {
+        clearTimeout(nullAuthTimerRef.current);
+        nullAuthTimerRef.current = null;
+      }
+
       if (firebaseUser) {
+        intentionalSignOutRef.current = false;
         // Always keep a signed-in user object — never clear session on metadata glitches
         const fallbackUser: User = {
-          username: firebaseUser.email || 'User',
-          role: 'curator',
+          username: firebaseUser.email || userRef.current?.username || 'User',
+          role: userRef.current?.role || 'curator',
         };
         try {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (userDoc.exists()) {
             const data = userDoc.data();
-            setUser({
+            applyUser({
               username: data.username || firebaseUser.email || 'User',
               role: normalizeRole(data.role),
             });
@@ -89,19 +136,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               lastLogin: Timestamp.now(),
             }).catch((err) => console.warn('[AUTH] lastLogin update skipped:', err));
           } else {
-            setUser(fallbackUser);
+            applyUser(fallbackUser);
           }
         } catch (err) {
           console.error('Error fetching user metadata:', err);
-          setUser(fallbackUser);
+          applyUser(fallbackUser);
         }
-      } else {
-        setUser(null);
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      // firebaseUser === null
+      if (intentionalSignOutRef.current) {
+        applyUser(null);
+        setLoading(false);
+        return;
+      }
+
+      // Transient null (alt-tab / token refresh / remount): keep cached session briefly
+      // and only clear if Auth stays signed-out.
+      nullAuthTimerRef.current = setTimeout(() => {
+        nullAuthTimerRef.current = null;
+        if (auth.currentUser) {
+          return;
+        }
+        if (intentionalSignOutRef.current) {
+          applyUser(null);
+          setLoading(false);
+          return;
+        }
+        // Confirmed signed out
+        applyUser(null);
+        setLoading(false);
+      }, AUTH_NULL_GRACE_MS);
+
+      // If we already have a cached/UI user, stay on the dashboard while we wait
+      if (userRef.current) {
+        setLoading(false);
+      } else {
+        setLoading(false);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (nullAuthTimerRef.current) {
+        clearTimeout(nullAuthTimerRef.current);
+      }
+    };
   }, []);
 
   // --- Real-time listeners for Managed Users (Admin only) ---
@@ -163,10 +245,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Note: The previous signature used 'username'. We changed it to 'email' because Firebase Auth uses Email/Password by default.
   const login = async (email: string, password: string): Promise<{ success: boolean; error: string }> => {
     try {
-      // For a robust lockout system, you'd check Firestore before attempting auth, 
-      // but without a backend, we just rely on Firebase Auth limits and client-side checks if they exist in managedUsers.
-      // Simplest approach: let Firebase handle password validation.
-      
+      intentionalSignOutRef.current = false;
       await signInWithEmailAndPassword(auth, email, password);
       return { success: true, error: '' };
     } catch (error: any) {
@@ -180,6 +259,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
+    intentionalSignOutRef.current = true;
+    if (nullAuthTimerRef.current) {
+      clearTimeout(nullAuthTimerRef.current);
+      nullAuthTimerRef.current = null;
+    }
+    applyUser(null);
     await signOut(auth);
   };
 
@@ -380,7 +465,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading
       }}
     >
-      {!loading && children}
+      {/* Keep tree mounted when we have a cached session so Layout never flashes to login */}
+      {(!loading || user) ? children : (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600 text-sm">
+          Restoring session…
+        </div>
+      )}
     </AuthContext.Provider>
   );
 }
