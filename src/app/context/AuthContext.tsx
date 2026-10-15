@@ -59,7 +59,7 @@ function normalizeRole(value: unknown): 'admin' | 'curator' {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const SESSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const SESSION_TIMEOUT_MS = 8 * 60 * 60 * 1000; // 8 hours (museum dashboard stays signed in)
 const MAX_FAILED_ATTEMPTS = 3;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -161,6 +161,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 
   // --- Session Timeout: track user activity ---
+  // Idle time does NOT count while the tab is hidden (alt-tab / other apps),
+  // so switching windows will not force an unexpected logout.
   const resetActivityTimer = useCallback(() => {
     lastActivityRef.current = Date.now();
   }, []);
@@ -168,23 +170,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) return;
 
-    const activityEvents = ['mousedown', 'keydown', 'mousemove', 'touchstart', 'scroll'];
-    activityEvents.forEach(event =>
+    const activityEvents = ['mousedown', 'keydown', 'mousemove', 'touchstart', 'scroll', 'focus'];
+    activityEvents.forEach((event) =>
       window.addEventListener(event, resetActivityTimer, { passive: true })
     );
 
-    // Check every 30 seconds if user has been idle for 5 min
+    const onVisibility = () => {
+      // Returning to the tab counts as activity; pause idle while hidden
+      if (!document.hidden) {
+        lastActivityRef.current = Date.now();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
     const interval = setInterval(() => {
+      if (document.hidden) return; // don't idle-logout while alt-tabbed away
       const elapsed = Date.now() - lastActivityRef.current;
       if (elapsed >= SESSION_TIMEOUT_MS) {
-        auth.signOut();
+        toast.message('Signed out due to inactivity.');
+        void auth.signOut();
       }
     }, 30_000);
 
     return () => {
-      activityEvents.forEach(event =>
+      activityEvents.forEach((event) =>
         window.removeEventListener(event, resetActivityTimer)
       );
+      document.removeEventListener('visibilitychange', onVisibility);
       clearInterval(interval);
     };
   }, [user, resetActivityTimer]);

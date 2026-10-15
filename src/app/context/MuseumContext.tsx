@@ -835,13 +835,13 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
   /**
    * After the website creates an alert, queue an SMS job for the ESP SIM800L.
    * ESP polls /smsCommands/{deviceId} and only then sends the text.
+   * Message is plain ASCII so the ESP simple JSON parser + GSM 7-bit stay reliable.
    */
   const queueSmsForEsp = async (alert: Alert) => {
     const sensor = sensorsRef.current.find((s) => s.id === alert.sensorId);
-    const shortMsg = `HIYAS ALERT [${alert.severity.toUpperCase()}]: ${alert.message}`.slice(
-      0,
-      160
-    );
+    const name = (sensor?.name || alert.sensorId).replace(/[^\w\s\-./]/g, "").slice(0, 40);
+    const kind = alert.conditionKind || alert.type;
+    const shortMsg = `HIYAS ${alert.severity.toUpperCase()}: ${name} ${kind}`.slice(0, 150);
     try {
       await rtdbSet(rtdbRef(rtdb, `smsCommands/${alert.sensorId}`), {
         alertId: alert.id,
@@ -854,9 +854,11 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         createdAt: Date.now(),
         sent: false,
       });
-      console.log("[SMS] Queued for ESP", alert.sensorId, alert.id);
+      console.log("[SMS] Queued for ESP", alert.sensorId, alert.id, shortMsg);
+      toast.message("SMS queued for SIM800L");
     } catch (err) {
       console.error("[SMS] Failed to queue command for ESP:", err);
+      toast.error("Could not queue SMS for SIM800L. Check RTDB permissions.");
     }
   };
 

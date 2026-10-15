@@ -235,7 +235,13 @@ void pollSmsCommandFromWebsite() {
     return; // no pending command
   }
 
-  if (jsonGetBool(body, "sent", false)) return;
+  Serial.print("[SMS] poll body: ");
+  Serial.println(body);
+
+  if (jsonGetBool(body, "sent", false)) {
+    Serial.println("[SMS] command already marked sent");
+    return;
+  }
 
   String alertId = jsonGetString(body, "alertId");
   String message = jsonGetString(body, "message");
