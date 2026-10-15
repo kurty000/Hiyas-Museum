@@ -29,31 +29,33 @@ function AuthenticatedApp() {
   );
 }
 
-function App() {
-  const router = createBrowserRouter([
-    {
-      path: "/",
-      element: <RootLayout />,
-      children: [
-        {
-          index: true,
-          element: <Login />,
-        },
-        {
-          path: "dashboard",
-          element: <AuthenticatedApp />,
-          children: [
-            { index: true, Component: Dashboard },
-            { path: "sensors", Component: Sensors },
-            { path: "alerts", Component: Alerts },
-            { path: "settings", Component: Settings },
-            { path: "reports", Component: Reports },
-          ],
-        },
-      ],
-    },
-  ]);
+// Stable router — creating this inside App() remounts AuthProvider on every render
+// and can look like an unexpected logout (session state resets to null).
+const router = createBrowserRouter([
+  {
+    path: "/",
+    element: <RootLayout />,
+    children: [
+      {
+        index: true,
+        element: <Login />,
+      },
+      {
+        path: "dashboard",
+        element: <AuthenticatedApp />,
+        children: [
+          { index: true, Component: Dashboard },
+          { path: "sensors", Component: Sensors },
+          { path: "alerts", Component: Alerts },
+          { path: "settings", Component: Settings },
+          { path: "reports", Component: Reports },
+        ],
+      },
+    ],
+  },
+]);
 
+function App() {
   return <RouterProvider router={router} />;
 }
 
