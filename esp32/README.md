@@ -1,33 +1,20 @@
-# Hiyas Museum ESP32 + SIM800L
+# Hiyas Museum ESP32 sensor node
 
-## Alert → SMS flow
+Uploads live readings to Firebase RTDB `/liveSensors/{DEVICE_ID}`.
 
-1. ESP uploads sensor data to RTDB `/liveSensors/{DEVICE_ID}`
-2. Website evaluates thresholds and **creates an alert**
-3. Website writes RTDB `/smsCommands/{DEVICE_ID}` (`sent: false`, message, to)
-4. ESP polls that path and **only then** sends SMS via SIM800L
-5. ESP marks the command `sent: true`
-
-ESP does **not** SMS on local critical by itself.
-
-## Wiring
+## Pins
 
 | Device | ESP32 |
 |--------|-------|
 | PIR | IO13 |
 | DHT11 | IO15 |
-| TRIG / ECHO | IO4 / IO5 |
-| SIM800L RX ← | IO16 (TX) |
-| SIM800L TX → | IO17 (RX) |
-| SIM800L VCC | separate **5V_GSM** |
+| HC-SR04 TRIG | IO4 |
+| HC-SR04 ECHO | IO5 |
 
-## Numbers
+`DEVICE_ID` must match the registered sensor id on the website (e.g. `esp32_gallery_a_1`).
 
-- Receiver: `+639602990107` (09602990107)
-- Set by the website in the SMS command (`to` field)
+## Notes
 
-## Serial (115200)
-
-- `Firebase live: 200` — sensor upload OK
-- `[SMS] Website alert command received` — site queued a text
-- `[SIM] SMS OK` — SIM800L sent it
+- Serial Monitor baud: **115200**
+- Includes a rising `heartbeat` field so the site stays Online when readings are stable
+- Expect `Firebase: 200` every ~5 seconds when DHT reads are valid

@@ -1,17 +1,19 @@
 /*
- * Hiyas Museum — ESP32 + SIM800L sensor node
+ * Hiyas Museum — ESP32 sensor node
  *
- * Flow:
- *   1) ESP writes sensor data → RTDB /liveSensors/{DEVICE_ID}
- *   2) Website creates an alert in Firestore
- *   3) Website queues RTDB /smsCommands/{DEVICE_ID}
- *   4) ESP polls that command and ONLY THEN sends SMS via SIM800L
+ * Writes to Firebase RTDB: /liveSensors/{DEVICE_ID}
+ * Website rule: DEVICE_ID must match the registered Firestore sensor document id.
  *
- * Pins (schematic):
- *   PIR IO13 | DHT11 IO15 | TRIG IO4 | ECHO IO5
- *   SIM800L: ESP IO16 TX → SIM RX | ESP IO17 RX ← SIM TX
+ * IMPORTANT: send a changing "heartbeat" on every PUT so the dashboard
+ * can refresh last-seen even when temperature/humidity stay the same.
+ * Without heartbeat, stable readings look "dead" / Offline after the timeout
+ * because identical RTDB payloads do not notify website listeners.
  *
- * Serial Monitor: 115200
+ * Serial Monitor: set baud to 115200.
+ * Firebase HTTP codes printed as "Firebase: <code>":
+ *   200       = OK — write accepted
+ *   401 / 403 = Permission denied — check database.rules.json / path / JSON shape
+ *   -1        = Connection failed — WiFi, TLS, DNS, or host URL
  */
 
 #include <WiFi.h>
@@ -22,6 +24,7 @@
 const char* WIFI_SSID     = "Free_Wifi";
 const char* WIFI_PASSWORD = "P@ssw0rd2026";
 
+// Must match the registered sensor id on the website exactly
 const char* DEVICE_ID   = "esp32_gallery_a_1";
 const char* DEVICE_NAME = "Gallery A - Artifact 1";
 const char* LOCATION    = "Gallery A";
@@ -29,240 +32,21 @@ const char* LOCATION    = "Gallery A";
 const char* FIREBASE_HOST =
   "https://hiyas-museum-da909-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-// Fallback if queue omits "to" (website normally sets this)
-const char* SMS_TO_DEFAULT = "+639602990107";
-
-#define PIR_PIN   13
-#define DHT_PIN   15
-#define DHT_TYPE  DHT11
-#define TRIG_PIN  4
-#define ECHO_PIN  5
-#define SIM_RX_PIN 17
-#define SIM_TX_PIN 16
+#define PIR_PIN  13
+#define DHT_PIN  15
+#define DHT_TYPE DHT11
+#define ECHO_PIN 5
+#define TRIG_PIN 4
 
 DHT dht(DHT_PIN, DHT_TYPE);
-HardwareSerial SimSerial(2);
 
 unsigned long lastSendMs = 0;
-unsigned long lastSmsPollMs = 0;
 const unsigned long SEND_INTERVAL_MS = 5000;
-const unsigned long SMS_POLL_INTERVAL_MS = 3000;
 unsigned long heartbeat = 0;
-String lastHandledAlertId = "";
 
-// ── SIM800L ──────────────────────────────────────────────────────
-String simReadResponse(unsigned long timeoutMs = 3000) {
-  String resp;
-  unsigned long start = millis();
-  while (millis() - start < timeoutMs) {
-    while (SimSerial.available()) {
-      char c = (char)SimSerial.read();
-      resp += c;
-      start = millis();
-    }
-    delay(10);
-  }
-  return resp;
-}
-
-bool simSendCommand(const String& cmd, const char* expect = "OK", unsigned long timeoutMs = 3000) {
-  Serial.print("[SIM] >> ");
-  Serial.println(cmd);
-  SimSerial.println(cmd);
-  String resp = simReadResponse(timeoutMs);
-  Serial.print("[SIM] << ");
-  Serial.println(resp);
-  return expect == nullptr || resp.indexOf(expect) >= 0;
-}
-
-bool simWaitFor(const char* token, unsigned long timeoutMs = 10000) {
-  String resp;
-  unsigned long start = millis();
-  while (millis() - start < timeoutMs) {
-    while (SimSerial.available()) {
-      char c = (char)SimSerial.read();
-      resp += c;
-      if (resp.indexOf(token) >= 0) {
-        Serial.print("[SIM] << ");
-        Serial.println(resp);
-        return true;
-      }
-    }
-    delay(10);
-  }
-  Serial.print("[SIM] timeout waiting for ");
-  Serial.println(token);
-  return false;
-}
-
-bool initSim800L() {
-  SimSerial.begin(9600, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
-  delay(2000);
-
-  for (int i = 0; i < 5; i++) {
-    if (simSendCommand("AT", "OK", 2000)) break;
-    delay(500);
-  }
-  if (!simSendCommand("AT", "OK", 2000)) {
-    Serial.println("[SIM] No response — check 5V_GSM / TX-RX");
-    return false;
-  }
-
-  simSendCommand("ATE0", "OK");
-  simSendCommand("AT+CMGF=1", "OK");
-  simSendCommand("AT+CSCS=\"GSM\"", "OK");
-  simSendCommand("AT+CNMI=0,0,0,0,0", "OK");
-  simSendCommand("AT+CSQ", "OK");
-  return true;
-}
-
-bool sendSms(const String& to, const String& message) {
-  Serial.println("[SIM] Sending SMS (website-triggered)...");
-  Serial.print("[SIM] To: "); Serial.println(to);
-  Serial.print("[SIM] Msg: "); Serial.println(message);
-
-  if (!simSendCommand("AT+CMGF=1", "OK", 2000)) return false;
-
-  SimSerial.print("AT+CMGS=\"");
-  SimSerial.print(to);
-  SimSerial.println("\"");
-
-  if (!simWaitFor(">", 8000)) {
-    SimSerial.write(0x1B);
-    return false;
-  }
-
-  SimSerial.print(message);
-  SimSerial.write(0x1A);
-
-  String resp = simReadResponse(15000);
-  Serial.print("[SIM] << ");
-  Serial.println(resp);
-  bool ok = resp.indexOf("+CMGS:") >= 0 || resp.indexOf("OK") >= 0;
-  Serial.println(ok ? "[SIM] SMS OK" : "[SIM] SMS FAILED");
-  return ok;
-}
-
-// ── Firebase HTTP ────────────────────────────────────────────────
-bool putFirebaseLive(const String& json) {
-  String url = String(FIREBASE_HOST) + "/liveSensors/" + DEVICE_ID + ".json";
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.PUT(json);
-  http.end();
-  Serial.print("Firebase live: ");
-  Serial.println(code);
-  return code >= 200 && code < 300;
-}
-
-bool markSmsCommandSent(const String& alertId) {
-  // Replace command with sent=true so website/rules accept unauthenticated ack
-  String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
-  String json = "{";
-  json += "\"alertId\":\"" + alertId + "\",";
-  json += "\"message\":\"\",";
-  json += "\"sent\":true";
-  json += "}";
-
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.PUT(json);
-  http.end();
-  Serial.print("Firebase SMS ack: ");
-  Serial.println(code);
-  return code >= 200 && code < 300;
-}
-
-bool deleteSmsCommand() {
-  String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.begin(client, url);
-  int code = http.sendRequest("DELETE");
-  http.end();
-  Serial.print("Firebase SMS clear: ");
-  Serial.println(code);
-  return code >= 200 && code < 300;
-}
-
-/** Extract JSON string value for a key (simple parser — no ArduinoJson required) */
-String jsonGetString(const String& body, const char* key) {
-  String pattern = String("\"") + key + "\":\"";
-  int start = body.indexOf(pattern);
-  if (start < 0) return "";
-  start += pattern.length();
-  int end = body.indexOf("\"", start);
-  if (end < 0) return "";
-  return body.substring(start, end);
-}
-
-bool jsonGetBool(const String& body, const char* key, bool defaultVal = false) {
-  String pattern = String("\"") + key + "\":";
-  int start = body.indexOf(pattern);
-  if (start < 0) return defaultVal;
-  start += pattern.length();
-  while (start < (int)body.length() && body[start] == ' ') start++;
-  if (body.startsWith("true", start)) return true;
-  if (body.startsWith("false", start)) return false;
-  return defaultVal;
-}
-
-/** Poll RTDB for a website-queued SMS command */
-void pollSmsCommandFromWebsite() {
-  String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.begin(client, url);
-  int code = http.GET();
-  String body = http.getString();
-  http.end();
-
-  if (code != 200) {
-    Serial.print("[SMS] poll HTTP ");
-    Serial.println(code);
-    return;
-  }
-
-  if (body == "null" || body.length() < 5) {
-    return; // no pending command
-  }
-
-  if (jsonGetBool(body, "sent", false)) return;
-
-  String alertId = jsonGetString(body, "alertId");
-  String message = jsonGetString(body, "message");
-  String to = jsonGetString(body, "to");
-  if (to.length() == 0) to = SMS_TO_DEFAULT;
-
-  // Unescape minimal sequences if website sent plain text (no quotes inside)
-  if (message.length() == 0) {
-    Serial.println("[SMS] Empty message — ignore");
-    return;
-  }
-
-  if (alertId.length() > 0 && lastHandledAlertId == alertId) {
-    Serial.println("[SMS] Already handled this alertId");
-    markSmsCommandSent(alertId);
-    return;
-  }
-
-  Serial.println("[SMS] Website alert command received — sending via SIM800L");
-  if (sendSms(to, message)) {
-    lastHandledAlertId = alertId;
-    markSmsCommandSent(alertId.length() ? alertId : "ok");
-  }
-}
-
-String buildLiveJson(float t, float h, bool motion, float distance, String status) {
+String buildJson(float t, float h, bool motion, float distance, String status) {
   heartbeat++;
+
   String json = "{";
   json += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
   json += "\"name\":\"" + String(DEVICE_NAME) + "\",";
@@ -272,10 +56,34 @@ String buildLiveJson(float t, float h, bool motion, float distance, String statu
   json += "\"motionDetected\":" + String(motion ? "true" : "false") + ",";
   json += "\"distanceCm\":" + String(distance, 1) + ",";
   json += "\"status\":\"" + status + "\",";
+  // Changing every send — keeps the website Online while this ESP is alive
   json += "\"heartbeat\":" + String(heartbeat) + ",";
   json += "\"source\":\"esp32\"";
   json += "}";
   return json;
+}
+
+bool putFirebase(String json) {
+  String url = String(FIREBASE_HOST) + "/liveSensors/" + DEVICE_ID + ".json";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.PUT(json);
+  String body = http.getString();
+  http.end();
+
+  Serial.print("Firebase: ");
+  Serial.println(code);
+  // 200 OK | 401/403 rules denied | -1 connection/TLS/DNS failure
+  if (code < 200 || code >= 300) {
+    Serial.print("Firebase body: ");
+    Serial.println(body);
+  }
+  return code >= 200 && code < 300;
 }
 
 void connectWiFi() {
@@ -287,6 +95,7 @@ void connectWiFi() {
     Serial.print(".");
   }
   Serial.println();
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
 }
 
@@ -296,6 +105,7 @@ float readDistanceCm() {
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
+
   long duration = pulseIn(ECHO_PIN, HIGH, 30000);
   if (duration == 0) return -1;
   return duration * 0.0343 / 2.0;
@@ -307,14 +117,10 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   dht.begin();
-
-  Serial.println("Hiyas Museum ESP + SIM800L");
-  Serial.println("SMS only after website creates an alert");
+  connectWiFi();
+  Serial.println("Hiyas Museum ESP ready");
   Serial.print("DEVICE_ID=");
   Serial.println(DEVICE_ID);
-
-  initSim800L();
-  connectWiFi();
   delay(2000);
 }
 
@@ -332,27 +138,19 @@ void loop() {
   Serial.print("PIR: "); Serial.println(motion ? "MOTION" : "NO MOTION");
   Serial.print("Distance: "); Serial.println(distance);
 
-  String status = "safe";
-  if (motion || (distance > 0 && distance < 50)) status = "critical";
-  else if (!isnan(temperature) && !isnan(humidity) &&
-           (temperature > 24 || humidity > 60)) status = "warning";
-
-  // 1) Upload live readings (no local SMS here)
   if (!isnan(temperature) && !isnan(humidity) && millis() - lastSendMs >= SEND_INTERVAL_MS) {
     lastSendMs = millis();
+
+    String status = "safe";
+    if (motion || (distance > 0 && distance < 50)) status = "critical";
+    else if (temperature > 24 || humidity > 60) status = "warning";
+
     float dist = distance < 0 ? 999 : distance;
-    putFirebaseLive(buildLiveJson(temperature, humidity, motion, dist, status));
+    putFirebase(buildJson(temperature, humidity, motion, dist, status));
   } else if (isnan(temperature) || isnan(humidity)) {
-    Serial.println("DHT nan — skip Firebase PUT");
+    Serial.println("DHT read failed — skip PUT (need temperature+humidity for RTDB rules)");
   }
 
-  // 2) Poll website SMS queue (only send if alert was created on the site)
-  if (millis() - lastSmsPollMs >= SMS_POLL_INTERVAL_MS) {
-    lastSmsPollMs = millis();
-    pollSmsCommandFromWebsite();
-  }
-
-  Serial.print("Status: "); Serial.println(status);
   Serial.println("==============================");
-  delay(500);
+  delay(2000);
 }

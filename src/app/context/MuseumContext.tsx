@@ -4,7 +4,7 @@ import {
   collection, doc, onSnapshot, addDoc, updateDoc, setDoc, deleteDoc, getDocs, writeBatch,
   Timestamp, query, orderBy, limit, where
 } from "firebase/firestore";
-import { onValue, ref as rtdbRef, remove as rtdbRemove, set as rtdbSet } from "firebase/database";
+import { onValue, ref as rtdbRef, remove as rtdbRemove } from "firebase/database";
 import { db, rtdb } from "../firebase";
 
 export interface SensorData {
@@ -832,34 +832,6 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  /**
-   * After the website creates an alert, queue an SMS job for the ESP SIM800L.
-   * ESP polls /smsCommands/{deviceId} and only then sends the text.
-   */
-  const queueSmsForEsp = async (alert: Alert) => {
-    const sensor = sensorsRef.current.find((s) => s.id === alert.sensorId);
-    const shortMsg = `HIYAS ALERT [${alert.severity.toUpperCase()}]: ${alert.message}`.slice(
-      0,
-      160
-    );
-    try {
-      await rtdbSet(rtdbRef(rtdb, `smsCommands/${alert.sensorId}`), {
-        alertId: alert.id,
-        to: "+639602990107",
-        message: shortMsg,
-        severity: alert.severity,
-        conditionKind: alert.conditionKind ?? null,
-        sensorName: sensor?.name ?? alert.sensorId,
-        location: sensor?.location ?? "",
-        createdAt: Date.now(),
-        sent: false,
-      });
-      console.log("[SMS] Queued for ESP", alert.sensorId, alert.id);
-    } catch (err) {
-      console.error("[SMS] Failed to queue command for ESP:", err);
-    }
-  };
-
   // ── 4. Hardware Trigger Simulation ────────────────────────────
   const triggerBuzzer = (sensorName: string) => {
     console.log(`[HARDWARE BUZZER] ALARM ACTIVATED AT ${sensorName}`);
@@ -1016,9 +988,6 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         });
         const fullAlert: Alert = { ...alert, id: alertRef.id };
         dispatchAlert(fullAlert);
-
-        // ESP SIM800L sends SMS only after this website alert exists
-        await queueSmsForEsp(fullAlert);
 
         if (alert.type === "security" && alert.severity === "critical") {
           const sensor = sensorSnapshot.find((s) => s.id === alert.sensorId);

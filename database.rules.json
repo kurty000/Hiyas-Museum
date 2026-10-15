@@ -9,13 +9,6 @@
         ".write": "auth != null || (newData.exists() && newData.hasChildren(['temperature', 'humidity']) && (!newData.hasChild('deviceId') || newData.child('deviceId').val() === $deviceId))",
         ".validate": "newData.child('temperature').isNumber() && newData.child('humidity').isNumber() && (!newData.hasChild('distanceCm') || newData.child('distanceCm').isNumber()) && (!newData.hasChild('motionDetected') || newData.child('motionDetected').isBoolean())"
       }
-    },
-    "smsCommands": {
-      "$deviceId": {
-        ".read": true,
-        ".write": "auth != null || (newData.exists() && newData.hasChild('sent') && newData.child('sent').val() === true) || !newData.exists()",
-        ".validate": "!newData.exists() || (newData.hasChild('message') && newData.hasChild('sent'))"
-      }
     }
   }
 }
