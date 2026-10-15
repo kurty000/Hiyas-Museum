@@ -251,7 +251,7 @@ export default function Sensors() {
                       onClick={() => openRegisterDialog(device)}
                     >
                       <Plus className="w-4 h-4 mr-2" />
-                      Add Sensor
+                      Register Device
                     </Button>
                   )}
                 </CardContent>
@@ -439,7 +439,7 @@ export default function Sensors() {
                         <AlertDialogHeader>
                           <AlertDialogTitle>Delete Sensor</AlertDialogTitle>
                           <AlertDialogDescription>
-                            Permanently delete &quot;{sensor.name}&quot;? If the device keeps reporting, it will appear under Detected Devices so you can Add Sensor again.
+                            Permanently delete &quot;{sensor.name}&quot;? If the device keeps reporting, it will appear under Detected Devices so you can register it again.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
