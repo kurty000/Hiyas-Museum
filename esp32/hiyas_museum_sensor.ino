@@ -1,21 +1,17 @@
 /*
  * Hiyas Museum — ESP32 + SIM800L sensor node
  *
- * Sensors (match schematic):
- *   PIR  → IO13
- *   DHT11 → IO15
- *   HC-SR04 TRIG → IO4, ECHO → IO5
+ * Flow:
+ *   1) ESP writes sensor data → RTDB /liveSensors/{DEVICE_ID}
+ *   2) Website creates an alert in Firestore
+ *   3) Website queues RTDB /smsCommands/{DEVICE_ID}
+ *   4) ESP polls that command and ONLY THEN sends SMS via SIM800L
  *
- * SIM800L UART (match schematic):
- *   ESP32 IO16 (TX_SIM) → SIM800L RX  (via 10k/20k divider on schematic)
- *   ESP32 IO17 (RX_SIM) ← SIM800L TX
- *   SIM800L VCC on separate 5V_GSM supply (high current bursts)
+ * Pins (schematic):
+ *   PIR IO13 | DHT11 IO15 | TRIG IO4 | ECHO IO5
+ *   SIM800L: ESP IO16 TX → SIM RX | ESP IO17 RX ← SIM TX
  *
- * Firebase RTDB: /liveSensors/{DEVICE_ID}
- * SMS: one text per critical event (motion / too-close distance).
- *      Clears when status returns to safe/warning so a later breach can text again.
- *
- * Serial Monitor baud: 115200
+ * Serial Monitor: 115200
  */
 
 #include <WiFi.h>
@@ -23,7 +19,6 @@
 #include <WiFiClientSecure.h>
 #include <DHT.h>
 
-// ── WiFi / Firebase ──────────────────────────────────────────────
 const char* WIFI_SSID     = "Free_Wifi";
 const char* WIFI_PASSWORD = "P@ssw0rd2026";
 
@@ -34,31 +29,28 @@ const char* LOCATION    = "Gallery A";
 const char* FIREBASE_HOST =
   "https://hiyas-museum-da909-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-// ── SMS (Philippines numbers → E.164) ────────────────────────────
-// SIM in module: 09602506714  |  Receiver: 09602990107
-const char* SMS_TO = "+639602990107";
+// Fallback if queue omits "to" (website normally sets this)
+const char* SMS_TO_DEFAULT = "+639602990107";
 
-// ── Pins (schematic) ─────────────────────────────────────────────
 #define PIR_PIN   13
 #define DHT_PIN   15
 #define DHT_TYPE  DHT11
 #define TRIG_PIN  4
 #define ECHO_PIN  5
-
-#define SIM_RX_PIN 17  // ESP receives from SIM800L TX
-#define SIM_TX_PIN 16  // ESP transmits to SIM800L RX
+#define SIM_RX_PIN 17
+#define SIM_TX_PIN 16
 
 DHT dht(DHT_PIN, DHT_TYPE);
 HardwareSerial SimSerial(2);
 
 unsigned long lastSendMs = 0;
+unsigned long lastSmsPollMs = 0;
 const unsigned long SEND_INTERVAL_MS = 5000;
+const unsigned long SMS_POLL_INTERVAL_MS = 3000;
 unsigned long heartbeat = 0;
+String lastHandledAlertId = "";
 
-/** One SMS per critical stretch — same idea as website one-notification-per-event */
-bool smsSentForCritical = false;
-
-// ── SIM800L helpers ──────────────────────────────────────────────
+// ── SIM800L ──────────────────────────────────────────────────────
 String simReadResponse(unsigned long timeoutMs = 3000) {
   String resp;
   unsigned long start = millis();
@@ -66,7 +58,7 @@ String simReadResponse(unsigned long timeoutMs = 3000) {
     while (SimSerial.available()) {
       char c = (char)SimSerial.read();
       resp += c;
-      start = millis(); // extend while data keeps arriving
+      start = millis();
     }
     delay(10);
   }
@@ -100,8 +92,6 @@ bool simWaitFor(const char* token, unsigned long timeoutMs = 10000) {
   }
   Serial.print("[SIM] timeout waiting for ");
   Serial.println(token);
-  Serial.print("[SIM] << ");
-  Serial.println(resp);
   return false;
 }
 
@@ -109,50 +99,28 @@ bool initSim800L() {
   SimSerial.begin(9600, SERIAL_8N1, SIM_RX_PIN, SIM_TX_PIN);
   delay(2000);
 
-  // Wake / basic AT
   for (int i = 0; i < 5; i++) {
     if (simSendCommand("AT", "OK", 2000)) break;
     delay(500);
   }
   if (!simSendCommand("AT", "OK", 2000)) {
-    Serial.println("[SIM] Module not responding — check 5V_GSM power, GND, TX/RX");
+    Serial.println("[SIM] No response — check 5V_GSM / TX-RX");
     return false;
   }
 
-  simSendCommand("ATE0", "OK");           // echo off
-  simSendCommand("AT+CMGF=1", "OK");      // text mode
+  simSendCommand("ATE0", "OK");
+  simSendCommand("AT+CMGF=1", "OK");
   simSendCommand("AT+CSCS=\"GSM\"", "OK");
-  simSendCommand("AT+CNMI=0,0,0,0,0", "OK"); // don't interrupt with inbound SMS
-
-  // Network registration (0,1 home or 0,5 roaming)
-  bool registered = false;
-  for (int i = 0; i < 15; i++) {
-    SimSerial.println("AT+CREG?");
-    String resp = simReadResponse(2000);
-    Serial.print("[SIM] CREG ");
-    Serial.println(resp);
-    if (resp.indexOf(",1") >= 0 || resp.indexOf(",5") >= 0) {
-      registered = true;
-      break;
-    }
-    delay(2000);
-  }
-  if (!registered) {
-    Serial.println("[SIM] Not registered on network yet — SMS may fail until signal is OK");
-  }
-
-  simSendCommand("AT+CSQ", "OK"); // signal quality
+  simSendCommand("AT+CNMI=0,0,0,0,0", "OK");
+  simSendCommand("AT+CSQ", "OK");
   return true;
 }
 
 bool sendSms(const String& to, const String& message) {
-  Serial.println("[SIM] Sending SMS...");
-  Serial.print("[SIM] To: ");
-  Serial.println(to);
-  Serial.print("[SIM] Msg: ");
-  Serial.println(message);
+  Serial.println("[SIM] Sending SMS (website-triggered)...");
+  Serial.print("[SIM] To: "); Serial.println(to);
+  Serial.print("[SIM] Msg: "); Serial.println(message);
 
-  // Ensure text mode
   if (!simSendCommand("AT+CMGF=1", "OK", 2000)) return false;
 
   SimSerial.print("AT+CMGS=\"");
@@ -160,15 +128,13 @@ bool sendSms(const String& to, const String& message) {
   SimSerial.println("\"");
 
   if (!simWaitFor(">", 8000)) {
-    Serial.println("[SIM] No '>' prompt — abort SMS");
-    SimSerial.write(0x1B); // ESC cancel
+    SimSerial.write(0x1B);
     return false;
   }
 
   SimSerial.print(message);
-  SimSerial.write(0x1A); // Ctrl+Z send
+  SimSerial.write(0x1A);
 
-  // Success typically includes +CMGS: and OK
   String resp = simReadResponse(15000);
   Serial.print("[SIM] << ");
   Serial.println(resp);
@@ -177,39 +143,126 @@ bool sendSms(const String& to, const String& message) {
   return ok;
 }
 
-void maybeSendCriticalSms(const String& status, bool motion, float distanceCm) {
-  bool critical = (status == "critical");
+// ── Firebase HTTP ────────────────────────────────────────────────
+bool putFirebaseLive(const String& json) {
+  String url = String(FIREBASE_HOST) + "/liveSensors/" + DEVICE_ID + ".json";
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.PUT(json);
+  http.end();
+  Serial.print("Firebase live: ");
+  Serial.println(code);
+  return code >= 200 && code < 300;
+}
 
-  if (!critical) {
-    // Event cleared — allow a new SMS on the next breach
-    smsSentForCritical = false;
+bool markSmsCommandSent(const String& alertId) {
+  // Replace command with sent=true so website/rules accept unauthenticated ack
+  String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
+  String json = "{";
+  json += "\"alertId\":\"" + alertId + "\",";
+  json += "\"message\":\"\",";
+  json += "\"sent\":true";
+  json += "}";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  int code = http.PUT(json);
+  http.end();
+  Serial.print("Firebase SMS ack: ");
+  Serial.println(code);
+  return code >= 200 && code < 300;
+}
+
+bool deleteSmsCommand() {
+  String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, url);
+  int code = http.sendRequest("DELETE");
+  http.end();
+  Serial.print("Firebase SMS clear: ");
+  Serial.println(code);
+  return code >= 200 && code < 300;
+}
+
+/** Extract JSON string value for a key (simple parser — no ArduinoJson required) */
+String jsonGetString(const String& body, const char* key) {
+  String pattern = String("\"") + key + "\":\"";
+  int start = body.indexOf(pattern);
+  if (start < 0) return "";
+  start += pattern.length();
+  int end = body.indexOf("\"", start);
+  if (end < 0) return "";
+  return body.substring(start, end);
+}
+
+bool jsonGetBool(const String& body, const char* key, bool defaultVal = false) {
+  String pattern = String("\"") + key + "\":";
+  int start = body.indexOf(pattern);
+  if (start < 0) return defaultVal;
+  start += pattern.length();
+  while (start < (int)body.length() && body[start] == ' ') start++;
+  if (body.startsWith("true", start)) return true;
+  if (body.startsWith("false", start)) return false;
+  return defaultVal;
+}
+
+/** Poll RTDB for a website-queued SMS command */
+void pollSmsCommandFromWebsite() {
+  String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.begin(client, url);
+  int code = http.GET();
+  String body = http.getString();
+  http.end();
+
+  if (code != 200) {
+    Serial.print("[SMS] poll HTTP ");
+    Serial.println(code);
     return;
   }
 
-  if (smsSentForCritical) return;
-
-  String msg = "HIYAS ALERT: ";
-  msg += DEVICE_NAME;
-  msg += " (";
-  msg += LOCATION;
-  msg += ") CRITICAL. ";
-  if (motion) msg += "Motion/proximity breach. ";
-  if (distanceCm > 0 && distanceCm < 50) {
-    msg += "Object at ";
-    msg += String(distanceCm, 1);
-    msg += " cm. ";
+  if (body == "null" || body.length() < 5) {
+    return; // no pending command
   }
-  msg += "Check museum now.";
 
-  if (sendSms(SMS_TO, msg)) {
-    smsSentForCritical = true;
+  if (jsonGetBool(body, "sent", false)) return;
+
+  String alertId = jsonGetString(body, "alertId");
+  String message = jsonGetString(body, "message");
+  String to = jsonGetString(body, "to");
+  if (to.length() == 0) to = SMS_TO_DEFAULT;
+
+  // Unescape minimal sequences if website sent plain text (no quotes inside)
+  if (message.length() == 0) {
+    Serial.println("[SMS] Empty message — ignore");
+    return;
+  }
+
+  if (alertId.length() > 0 && lastHandledAlertId == alertId) {
+    Serial.println("[SMS] Already handled this alertId");
+    markSmsCommandSent(alertId);
+    return;
+  }
+
+  Serial.println("[SMS] Website alert command received — sending via SIM800L");
+  if (sendSms(to, message)) {
+    lastHandledAlertId = alertId;
+    markSmsCommandSent(alertId.length() ? alertId : "ok");
   }
 }
 
-// ── Firebase ─────────────────────────────────────────────────────
-String buildJson(float t, float h, bool motion, float distance, String status) {
+String buildLiveJson(float t, float h, bool motion, float distance, String status) {
   heartbeat++;
-
   String json = "{";
   json += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
   json += "\"name\":\"" + String(DEVICE_NAME) + "\",";
@@ -220,26 +273,9 @@ String buildJson(float t, float h, bool motion, float distance, String status) {
   json += "\"distanceCm\":" + String(distance, 1) + ",";
   json += "\"status\":\"" + status + "\",";
   json += "\"heartbeat\":" + String(heartbeat) + ",";
-  json += "\"smsArmed\":" + String(smsSentForCritical ? "false" : "true") + ",";
   json += "\"source\":\"esp32\"";
   json += "}";
   return json;
-}
-
-bool putFirebase(String json) {
-  String url = String(FIREBASE_HOST) + "/liveSensors/" + DEVICE_ID + ".json";
-
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.PUT(json);
-  http.end();
-
-  Serial.print("Firebase: ");
-  Serial.println(code);
-  return code >= 200 && code < 300;
 }
 
 void connectWiFi() {
@@ -260,7 +296,6 @@ float readDistanceCm() {
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
-
   long duration = pulseIn(ECHO_PIN, HIGH, 30000);
   if (duration == 0) return -1;
   return duration * 0.0343 / 2.0;
@@ -274,10 +309,9 @@ void setup() {
   dht.begin();
 
   Serial.println("Hiyas Museum ESP + SIM800L");
+  Serial.println("SMS only after website creates an alert");
   Serial.print("DEVICE_ID=");
   Serial.println(DEVICE_ID);
-  Serial.print("SMS_TO=");
-  Serial.println(SMS_TO);
 
   initSim800L();
   connectWiFi();
@@ -303,19 +337,22 @@ void loop() {
   else if (!isnan(temperature) && !isnan(humidity) &&
            (temperature > 24 || humidity > 60)) status = "warning";
 
-  // SMS independent of DHT — security breach can still text
-  maybeSendCriticalSms(status, motion, distance);
-
+  // 1) Upload live readings (no local SMS here)
   if (!isnan(temperature) && !isnan(humidity) && millis() - lastSendMs >= SEND_INTERVAL_MS) {
     lastSendMs = millis();
     float dist = distance < 0 ? 999 : distance;
-    putFirebase(buildJson(temperature, humidity, motion, dist, status));
+    putFirebaseLive(buildLiveJson(temperature, humidity, motion, dist, status));
   } else if (isnan(temperature) || isnan(humidity)) {
-    Serial.println("DHT nan — skip Firebase PUT (SMS still active for critical)");
+    Serial.println("DHT nan — skip Firebase PUT");
+  }
+
+  // 2) Poll website SMS queue (only send if alert was created on the site)
+  if (millis() - lastSmsPollMs >= SMS_POLL_INTERVAL_MS) {
+    lastSmsPollMs = millis();
+    pollSmsCommandFromWebsite();
   }
 
   Serial.print("Status: "); Serial.println(status);
-  Serial.print("SMS latch: "); Serial.println(smsSentForCritical ? "sent-this-event" : "armed");
   Serial.println("==============================");
-  delay(2000);
+  delay(500);
 }
