@@ -836,14 +836,16 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
    * After the website creates an alert, queue an SMS job for the ESP SIM800L.
    * ESP polls /smsCommands/{deviceId} and only then sends the text.
    * Message is plain ASCII so the ESP simple JSON parser + GSM 7-bit stay reliable.
+   * Watches RTDB briefly so staff see whether the ESP acknowledged (sent: true).
    */
   const queueSmsForEsp = async (alert: Alert) => {
     const sensor = sensorsRef.current.find((s) => s.id === alert.sensorId);
     const name = (sensor?.name || alert.sensorId).replace(/[^\w\s\-./]/g, "").slice(0, 40);
     const kind = alert.conditionKind || alert.type;
     const shortMsg = `HIYAS ${alert.severity.toUpperCase()}: ${name} ${kind}`.slice(0, 150);
+    const cmdPath = `smsCommands/${alert.sensorId}`;
     try {
-      await rtdbSet(rtdbRef(rtdb, `smsCommands/${alert.sensorId}`), {
+      await rtdbSet(rtdbRef(rtdb, cmdPath), {
         alertId: alert.id,
         to: "+639602990107",
         message: shortMsg,
@@ -855,7 +857,35 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
         sent: false,
       });
       console.log("[SMS] Queued for ESP", alert.sensorId, alert.id, shortMsg);
-      toast.message("SMS queued for SIM800L");
+      toast.message("SMS queued for SIM800L — waiting for ESP…");
+
+      // Confirm ESP picked up the command (or warn if it stays pending)
+      const cmdRef = rtdbRef(rtdb, cmdPath);
+      let settled = false;
+      const unsub = onValue(
+        cmdRef,
+        (snap) => {
+          const val = snap.val() as { sent?: boolean; alertId?: string } | null;
+          if (!val || settled) return;
+          if (val.sent === true && (!val.alertId || val.alertId === alert.id)) {
+            settled = true;
+            unsub();
+            toast.success("SIM800L acknowledged SMS (sent: true in RTDB)");
+          }
+        },
+        (err) => {
+          console.warn("[SMS] Could not watch smsCommands ack:", err);
+        }
+      );
+      window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        unsub();
+        toast.warning(
+          "SMS still pending in Firebase — check ESP Serial for [SMS] poll / [SIM] SMS OK",
+          { duration: 8000 }
+        );
+      }, 45_000);
     } catch (err) {
       console.error("[SMS] Failed to queue command for ESP:", err);
       toast.error("Could not queue SMS for SIM800L. Check RTDB permissions.");

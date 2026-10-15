@@ -239,7 +239,9 @@ void pollSmsCommandFromWebsite() {
   Serial.println(body);
 
   if (jsonGetBool(body, "sent", false)) {
-    Serial.println("[SMS] command already marked sent");
+    // Leave sent:true briefly so the website can confirm, then clear the slot
+    Serial.println("[SMS] command already marked sent — clearing");
+    deleteSmsCommand();
     return;
   }
 
@@ -263,7 +265,10 @@ void pollSmsCommandFromWebsite() {
   Serial.println("[SMS] Website alert command received — sending via SIM800L");
   if (sendSms(to, message)) {
     lastHandledAlertId = alertId;
+    // Keep sent:true in RTDB so the dashboard toast can confirm delivery
     markSmsCommandSent(alertId.length() ? alertId : "ok");
+  } else {
+    Serial.println("[SMS] SIM800L failed — leaving command for retry");
   }
 }
 

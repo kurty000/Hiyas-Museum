@@ -11,10 +11,11 @@
       }
     },
     "smsCommands": {
+      ".read": "auth != null",
       "$deviceId": {
         ".read": true,
         ".write": "auth != null || (newData.exists() && newData.hasChild('sent') && newData.child('sent').val() === true) || !newData.exists()",
-        ".validate": "!newData.exists() || (newData.hasChild('message') && newData.hasChild('sent'))"
+        ".validate": "!newData.exists() || (newData.hasChild('message') && newData.hasChild('sent') && newData.hasChild('alertId'))"
       }
     }
   }
