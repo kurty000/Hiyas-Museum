@@ -1271,7 +1271,12 @@ export const MuseumProvider = ({ children }: { children: React.ReactNode }) => {
       try {
         await rtdbRemove(rtdbRef(rtdb, `liveSensors/${sensorId}`));
       } catch (rtdbErr) {
-        console.warn("[DELETE] RTDB cleanup skipped:", rtdbErr);
+        console.warn("[DELETE] RTDB liveSensors cleanup skipped:", rtdbErr);
+      }
+      try {
+        await rtdbRemove(rtdbRef(rtdb, `smsCommands/${sensorId}`));
+      } catch (rtdbErr) {
+        console.warn("[DELETE] RTDB smsCommands cleanup skipped:", rtdbErr);
       }
       toast.success("Sensor deleted. It will show as Detected if the device is still online.");
     } catch (error) {

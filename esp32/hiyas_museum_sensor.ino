@@ -6,12 +6,16 @@
  *   2) Website creates an alert in Firestore
  *   3) Website queues RTDB /smsCommands/{DEVICE_ID}
  *   4) ESP polls that command and ONLY THEN sends SMS via SIM800L
+ *   5) ESP marks sent=true (website toast confirms), then clears on next poll
  *
  * Pins (schematic):
  *   PIR IO13 | DHT11 IO15 | TRIG IO4 | ECHO IO5
  *   SIM800L: ESP IO16 TX → SIM RX | ESP IO17 RX ← SIM TX
  *
  * Serial Monitor: 115200
+ *
+ * IMPORTANT: always PUT a changing "heartbeat" so the dashboard stays Online.
+ * DHT nan must NOT skip the Firebase upload (motion/distance/heartbeat still matter).
  */
 
 #include <WiFi.h>
@@ -22,6 +26,7 @@
 const char* WIFI_SSID     = "Free_Wifi";
 const char* WIFI_PASSWORD = "P@ssw0rd2026";
 
+// Must match the registered Firestore sensor document id exactly
 const char* DEVICE_ID   = "esp32_gallery_a_1";
 const char* DEVICE_NAME = "Gallery A - Artifact 1";
 const char* LOCATION    = "Gallery A";
@@ -50,15 +55,26 @@ const unsigned long SMS_POLL_INTERVAL_MS = 3000;
 unsigned long heartbeat = 0;
 String lastHandledAlertId = "";
 
+// Last good DHT readings — keep uploading heartbeat/motion/distance if DHT flakes
+float lastGoodTemp = 22.0;
+float lastGoodHumidity = 50.0;
+
 // ── SIM800L ──────────────────────────────────────────────────────
-String simReadResponse(unsigned long timeoutMs = 3000) {
+/** Read until expect token appears, or timeout. Returns early on match (does not wait full silence). */
+String simReadUntil(const char* expect, unsigned long timeoutMs) {
   String resp;
   unsigned long start = millis();
   while (millis() - start < timeoutMs) {
     while (SimSerial.available()) {
       char c = (char)SimSerial.read();
       resp += c;
-      start = millis();
+      if (expect != nullptr && resp.indexOf(expect) >= 0) {
+        delay(30);
+        while (SimSerial.available()) {
+          resp += (char)SimSerial.read();
+        }
+        return resp;
+      }
     }
     delay(10);
   }
@@ -69,26 +85,18 @@ bool simSendCommand(const String& cmd, const char* expect = "OK", unsigned long 
   Serial.print("[SIM] >> ");
   Serial.println(cmd);
   SimSerial.println(cmd);
-  String resp = simReadResponse(timeoutMs);
+  String resp = simReadUntil(expect, timeoutMs);
   Serial.print("[SIM] << ");
   Serial.println(resp);
   return expect == nullptr || resp.indexOf(expect) >= 0;
 }
 
 bool simWaitFor(const char* token, unsigned long timeoutMs = 10000) {
-  String resp;
-  unsigned long start = millis();
-  while (millis() - start < timeoutMs) {
-    while (SimSerial.available()) {
-      char c = (char)SimSerial.read();
-      resp += c;
-      if (resp.indexOf(token) >= 0) {
-        Serial.print("[SIM] << ");
-        Serial.println(resp);
-        return true;
-      }
-    }
-    delay(10);
+  String resp = simReadUntil(token, timeoutMs);
+  if (resp.indexOf(token) >= 0) {
+    Serial.print("[SIM] << ");
+    Serial.println(resp);
+    return true;
   }
   Serial.print("[SIM] timeout waiting for ");
   Serial.println(token);
@@ -128,14 +136,19 @@ bool sendSms(const String& to, const String& message) {
   SimSerial.println("\"");
 
   if (!simWaitFor(">", 8000)) {
-    SimSerial.write(0x1B);
+    SimSerial.write(0x1B); // ESC cancel
     return false;
   }
 
   SimSerial.print(message);
-  SimSerial.write(0x1A);
+  SimSerial.write(0x1A); // Ctrl+Z
 
-  String resp = simReadResponse(15000);
+  // Prefer +CMGS: (true success); also accept OK. Exit early — do not burn 15s of silence.
+  String resp = simReadUntil("+CMGS:", 20000);
+  if (resp.indexOf("+CMGS:") < 0 && resp.indexOf("OK") < 0) {
+    String more = simReadUntil("OK", 5000);
+    resp += more;
+  }
   Serial.print("[SIM] << ");
   Serial.println(resp);
   bool ok = resp.indexOf("+CMGS:") >= 0 || resp.indexOf("OK") >= 0;
@@ -159,7 +172,8 @@ bool putFirebaseLive(const String& json) {
 }
 
 bool markSmsCommandSent(const String& alertId) {
-  // Replace command with sent=true so website/rules accept unauthenticated ack
+  // Rules require alertId + message + sent; unauthenticated write allowed when sent=true
+  // Keep sent:true briefly so the website watch can toast confirmation
   String url = String(FIREBASE_HOST) + "/smsCommands/" + DEVICE_ID + ".json";
   String json = "{";
   json += "\"alertId\":\"" + alertId + "\",";
@@ -250,9 +264,9 @@ void pollSmsCommandFromWebsite() {
   String to = jsonGetString(body, "to");
   if (to.length() == 0) to = SMS_TO_DEFAULT;
 
-  // Unescape minimal sequences if website sent plain text (no quotes inside)
   if (message.length() == 0) {
-    Serial.println("[SMS] Empty message — ignore");
+    Serial.println("[SMS] Empty message — ignore / clear junk");
+    markSmsCommandSent(alertId.length() ? alertId : "empty");
     return;
   }
 
@@ -337,24 +351,33 @@ void loop() {
   bool motion = digitalRead(PIR_PIN) == HIGH;
   float distance = readDistanceCm();
 
+  // Keep last good DHT so nan never blocks heartbeat / motion / distance uploads
+  bool dhtOk = !isnan(temperature) && !isnan(humidity);
+  if (dhtOk) {
+    lastGoodTemp = temperature;
+    lastGoodHumidity = humidity;
+  } else {
+    Serial.println("DHT nan — using last good values for Firebase PUT");
+    temperature = lastGoodTemp;
+    humidity = lastGoodHumidity;
+  }
+
   Serial.println("==============================");
   Serial.print("Temp: "); Serial.println(temperature);
   Serial.print("Humidity: "); Serial.println(humidity);
   Serial.print("PIR: "); Serial.println(motion ? "MOTION" : "NO MOTION");
   Serial.print("Distance: "); Serial.println(distance);
+  if (!dhtOk) Serial.println("(DHT reading was nan this cycle)");
 
   String status = "safe";
   if (motion || (distance > 0 && distance < 50)) status = "critical";
-  else if (!isnan(temperature) && !isnan(humidity) &&
-           (temperature > 24 || humidity > 60)) status = "warning";
+  else if (temperature > 24 || humidity > 60) status = "warning";
 
-  // 1) Upload live readings (no local SMS here)
-  if (!isnan(temperature) && !isnan(humidity) && millis() - lastSendMs >= SEND_INTERVAL_MS) {
+  // 1) Upload live readings every SEND_INTERVAL (always — keeps Online + motion fresh)
+  if (millis() - lastSendMs >= SEND_INTERVAL_MS) {
     lastSendMs = millis();
     float dist = distance < 0 ? 999 : distance;
     putFirebaseLive(buildLiveJson(temperature, humidity, motion, dist, status));
-  } else if (isnan(temperature) || isnan(humidity)) {
-    Serial.println("DHT nan — skip Firebase PUT");
   }
 
   // 2) Poll website SMS queue (only send if alert was created on the site)
