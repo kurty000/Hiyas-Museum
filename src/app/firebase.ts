@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getDatabase } from "firebase/database";
 
@@ -17,6 +17,10 @@ export const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
+// Keep admin signed in across tab switches / browser restarts
+void setPersistence(auth, browserLocalPersistence).catch((err) => {
+  console.warn("[AUTH] Could not set local persistence:", err);
+});
 export const db = getFirestore(app);
 /** Realtime Database — ESP32 writes live readings to /liveSensors/{deviceId} */
 export const rtdb = getDatabase(app);

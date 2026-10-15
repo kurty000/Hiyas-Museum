@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { initializeApp, deleteApp } from 'firebase/app';
 import {
   signInWithEmailAndPassword,
@@ -59,7 +59,6 @@ function normalizeRole(value: unknown): 'admin' | 'curator' {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const SESSION_TIMEOUT_MS = 8 * 60 * 60 * 1000; // 8 hours (museum dashboard stays signed in)
 const MAX_FAILED_ATTEMPTS = 3;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -67,14 +66,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
-  const lastActivityRef = useRef<number>(Date.now());
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- Firebase Auth Listener ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        // Fetch user metadata from Firestore
+        // Always keep a signed-in user object — never clear session on metadata glitches
+        const fallbackUser: User = {
+          username: firebaseUser.email || 'User',
+          role: 'curator',
+        };
         try {
           const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
           if (userDoc.exists()) {
@@ -83,20 +84,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               username: data.username || firebaseUser.email || 'User',
               role: normalizeRole(data.role),
             });
-            // Update last login
-            await updateDoc(doc(db, 'users', firebaseUser.uid), {
-              lastLogin: Timestamp.now()
-            });
+            // Best-effort lastLogin — must not log the user out if this fails
+            void updateDoc(doc(db, 'users', firebaseUser.uid), {
+              lastLogin: Timestamp.now(),
+            }).catch((err) => console.warn('[AUTH] lastLogin update skipped:', err));
           } else {
-            // Fallback if no user doc exists
-            setUser({
-              username: firebaseUser.email || 'User',
-              role: 'curator',
-            });
+            setUser(fallbackUser);
           }
         } catch (err) {
-          console.error("Error fetching user metadata:", err);
-          setUser(null);
+          console.error('Error fetching user metadata:', err);
+          setUser(fallbackUser);
         }
       } else {
         setUser(null);
@@ -160,46 +157,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user?.role]);
 
 
-  // --- Session Timeout: track user activity ---
-  // Idle time does NOT count while the tab is hidden (alt-tab / other apps),
-  // so switching windows will not force an unexpected logout.
-  const resetActivityTimer = useCallback(() => {
-    lastActivityRef.current = Date.now();
-  }, []);
-
-  useEffect(() => {
-    if (!user) return;
-
-    const activityEvents = ['mousedown', 'keydown', 'mousemove', 'touchstart', 'scroll', 'focus'];
-    activityEvents.forEach((event) =>
-      window.addEventListener(event, resetActivityTimer, { passive: true })
-    );
-
-    const onVisibility = () => {
-      // Returning to the tab counts as activity; pause idle while hidden
-      if (!document.hidden) {
-        lastActivityRef.current = Date.now();
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-
-    const interval = setInterval(() => {
-      if (document.hidden) return; // don't idle-logout while alt-tabbed away
-      const elapsed = Date.now() - lastActivityRef.current;
-      if (elapsed >= SESSION_TIMEOUT_MS) {
-        toast.message('Signed out due to inactivity.');
-        void auth.signOut();
-      }
-    }, 30_000);
-
-    return () => {
-      activityEvents.forEach((event) =>
-        window.removeEventListener(event, resetActivityTimer)
-      );
-      document.removeEventListener('visibilitychange', onVisibility);
-      clearInterval(interval);
-    };
-  }, [user, resetActivityTimer]);
+  // Idle auto-logout disabled — museum staff often alt-tab; session persists until Logout.
 
   // --- Login ---
   // Note: The previous signature used 'username'. We changed it to 'email' because Firebase Auth uses Email/Password by default.
@@ -210,7 +168,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Simplest approach: let Firebase handle password validation.
       
       await signInWithEmailAndPassword(auth, email, password);
-      lastActivityRef.current = Date.now();
       return { success: true, error: '' };
     } catch (error: any) {
       console.error("Login error", error);
